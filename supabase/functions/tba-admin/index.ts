@@ -22,7 +22,8 @@ function allowedOrigin(origin: string) {
       || /^10\./.test(url.hostname)
       || /^172\.(1[6-9]|2\d|3[01])\./.test(url.hostname);
     const hosted = url.hostname === "tbizave-reader.web.app"
-      || url.hostname === "tbizave-reader.firebaseapp.com";
+      || url.hostname === "tbizave-reader.firebaseapp.com"
+      || url.hostname === "bizave.kabomane.me";
     return local || hosted ? origin : "https://tbizave-reader.web.app";
   } catch {
     return "https://tbizave-reader.web.app";
@@ -390,6 +391,7 @@ Deno.serve(async (req) => {
         origin,
         "https://tbizave-reader.web.app",
         "https://tbizave-reader.firebaseapp.com",
+        "https://bizave.kabomane.me",
       ])];
       await cloudflareFetch(accountId, token, `/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}/cors`, {
         method: "PUT",
