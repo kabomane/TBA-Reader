@@ -29,6 +29,7 @@ import {
 } from "./supabase.js";
 
 const BOOKMARKS_KEY = "tba-bookmarks-v1";
+const R2_INCLUDED_BYTES = 10_000_000_000;
 const SHOWCASE_CACHE_KEY = "tba-showcase-cache-v1";
 const FORMAT_OPTIONS = [
   { value: "Tous", label: "Tous" },
@@ -769,6 +770,9 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
   const used = Number(status?.supabaseBytes ?? 0);
   const quota = Number(config.quotaBytes ?? 1_000_000_000);
   const percent = Math.min(100, quota ? used / quota * 100 : 0);
+  const r2Used = Number(status?.r2Bytes ?? 0);
+  const r2Percent = Math.min(100, r2Used / R2_INCLUDED_BYTES * 100);
+  const r2PercentLabel = r2Percent > 0 && r2Percent < 0.1 ? r2Percent.toFixed(2) : r2Percent.toFixed(1);
   const jobByEpisode = new Map((status?.jobs ?? []).map((job) => [job.episode_id, job]));
   return <section className="storage-panel">
     <header className="manage-heading storage-heading">
@@ -781,9 +785,10 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
         <div className="storage-meter"><i style={{ width: `${percent}%` }}/><b style={{ left: `${config.triggerPercent ?? 75}%` }}/></div>
         <p>{percent.toFixed(1)} % utilisé · seuil {config.triggerPercent ?? 75} %</p>
       </article>
-      <article className="storage-card">
-        <div><span>Cloudflare R2</span><strong>{formatBytes(status?.r2Bytes)}</strong><small>{config.r2Ready ? config.r2Bucket : "Non configuré"}</small></div>
-        <p>{!config.r2Ready ? "Configuration requise pour migrer" : config.r2Enabled ? "Connexion opérationnelle" : "Configuré · Désactivé"}</p>
+      <article className="storage-card r2-storage">
+        <div><span>Cloudflare R2</span><strong>{formatBytes(r2Used)}</strong><small>sur {formatBytes(R2_INCLUDED_BYTES)} inclus · {config.r2Ready ? config.r2Bucket : "Non configuré"}</small></div>
+        <div className="storage-meter"><i style={{ width: `${r2Percent}%`, minWidth: r2Used ? 3 : 0 }}/></div>
+        <p>{r2PercentLabel} % utilisé · {!config.r2Ready ? "configuration requise" : config.r2Enabled ? "connexion opérationnelle" : "configuré · désactivé"}</p>
       </article>
       <article className="storage-card compact"><span>Migration automatique</span><strong>{config.autoMigrationEnabled && config.r2Enabled ? "Active" : config.autoMigrationEnabled ? "Suspendue" : "Désactivée"}</strong><small>{config.autoMigrationEnabled && config.r2Enabled ? `Retour visé : ${config.targetPercent}%` : config.autoMigrationEnabled ? "Cloudflare R2 est désactivé" : "Activation dans Paramètres"}</small></article>
       <article className="storage-card compact"><span>Fichiers orphelins</span><strong>{status?.orphan?.objects ?? 0}</strong><small>{formatBytes(status?.orphan?.bytes)}</small></article>
@@ -828,13 +833,13 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
     {message && <div className="admin-notice">{message}</div>}
     {error && <p className="form-error">{error}</p>}
     <section className="settings-card">
-      <div className="settings-card-heading"><div><span>Automatisation</span><h3>Migration selon le quota</h3></div><label className="switch"><input type="checkbox" checked={autoMigrationEnabled} onChange={(event) => setAutoMigrationEnabled(event.target.checked)}/><i/></label></div>
+      <div className="settings-card-heading"><div><span>Automatisation</span><h3>Migration auto</h3></div><label className="switch"><input type="checkbox" checked={autoMigrationEnabled} onChange={(event) => setAutoMigrationEnabled(event.target.checked)}/><i/></label></div>
       <p>Désactivée par défaut. R2 doit être activé pour accepter un fichier supérieur à 50 Mo.</p>
       <div className="settings-grid"><label><span>Déclenchement (%)</span><input type="number" min="2" max="99" value={triggerPercent} onChange={(event) => setTriggerPercent(Number(event.target.value))}/></label><label><span>Objectif (%)</span><input type="number" min="1" max="98" value={targetPercent} onChange={(event) => setTargetPercent(Number(event.target.value))}/></label></div>
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSave({ autoMigrationEnabled, triggerPercent, targetPercent }), "Paramètres de stockage enregistrés.")}>Enregistrer</button>
     </section>
     <section className="settings-card">
-      <div className="settings-card-heading"><div><span>Cloudflare</span><h3>R2 automatique</h3></div><div className="settings-card-controls"><em className={status?.settings?.r2Enabled ? "ready" : ""}>{!status?.settings?.r2Ready ? "À configurer" : status.settings.r2Enabled ? "Actif" : "Désactivé"}</em><label className="switch"><input type="checkbox" aria-label="Activer Cloudflare R2" checked={Boolean(status?.settings?.r2Enabled)} disabled={busy || !status?.settings?.r2Ready} onChange={(event) => run(() => onToggleR2(event.target.checked), event.target.checked ? "Cloudflare R2 activé." : "Cloudflare R2 désactivé.")}/><i/></label></div></div>
+      <div className="settings-card-heading"><div><span>Cloudflare</span><h3>Bucket R2</h3></div><div className="settings-card-controls"><em className={status?.settings?.r2Enabled ? "ready" : ""}>{!status?.settings?.r2Ready ? "À configurer" : status.settings.r2Enabled ? "Actif" : "Désactivé"}</em><label className="switch"><input type="checkbox" aria-label="Activer Cloudflare R2" checked={Boolean(status?.settings?.r2Enabled)} disabled={busy || !status?.settings?.r2Ready} onChange={(event) => run(() => onToggleR2(event.target.checked), event.target.checked ? "Cloudflare R2 activé." : "Cloudflare R2 désactivé.")}/><i/></label></div></div>
       <p>L’assistant crée le bucket, configure CORS et active son adresse r2.dev.</p>
       <div className="settings-grid"><label><span>Account ID</span><input value={cloudflare.accountId} onChange={(event) => setCloudflare((old) => ({ ...old, accountId: event.target.value }))}/></label><label><span>Access Key ID parent</span><input value={cloudflare.parentAccessKeyId} onChange={(event) => setCloudflare((old) => ({ ...old, parentAccessKeyId: event.target.value }))}/></label><label className="wide"><span>Jeton API R2</span><input type="password" autoComplete="off" value={cloudflare.apiToken} onChange={(event) => setCloudflare((old) => ({ ...old, apiToken: event.target.value }))}/></label><label className="wide"><span>Nom du bucket</span><input value={cloudflare.bucket} onChange={(event) => setCloudflare((old) => ({ ...old, bucket: event.target.value.toLowerCase() }))}/></label></div>
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSetupR2(cloudflare), "Cloudflare R2 est prêt.")}>{status?.settings?.r2Ready ? "Tester et reconfigurer" : "Créer et connecter R2"}</button>

@@ -12,7 +12,6 @@
   "dependencies": {
     "@supabase/supabase-js": "2.110.7",
     "@vitejs/plugin-react": "^4.4.1",
-    "aws4fetch": "1.0.20",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",

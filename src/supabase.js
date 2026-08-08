@@ -1,4 +1,3 @@
-import { AwsClient } from "aws4fetch";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = "https://lfgllmxdcnylabdcvmsk.supabase.co";
@@ -271,33 +270,23 @@ async function fetchBlob(url, label) {
   return response.blob();
 }
 
-function r2Client(credentials) {
-  return new AwsClient({
-    accessKeyId: credentials.accessKeyId,
-    secretAccessKey: credentials.secretAccessKey,
-    sessionToken: credentials.sessionToken,
-    region: "auto",
-    service: "s3",
-  });
-}
-
 async function uploadR2Items(episodeId, items, pin) {
   if (!items.length) return [];
-  const credentials = await adminRequest(pin, {
-    action: "r2-credentials",
+  const signing = await adminRequest(pin, {
+    action: "r2-upload-urls",
     episodeId,
     objects: items.map((item) => item.key),
   });
-  const signer = r2Client(credentials);
   const uploaded = [];
   for (const item of items) {
-    const url = `https://${credentials.accountId}.r2.cloudflarestorage.com/${credentials.bucket}/${encodeObjectKey(item.key)}`;
-    const response = await signer.fetch(url, {
+    const target = signing.objects?.find((object) => object.key === item.key);
+    if (!target?.url) throw new Error(`URL R2 absente pour ${item.key}.`);
+    const response = await fetch(target.url, {
       method: "PUT",
       headers: { "Content-Type": item.blob.type || item.mime || "application/octet-stream" },
       body: item.blob,
     });
-    if (!response.ok) throw new Error(`Envoi R2 refusé pour ${item.key}.`);
+    if (!response.ok) throw new Error(`Envoi R2 refusé pour ${item.key} (${response.status}).`);
     uploaded.push({
       key: item.key,
       size: item.blob.size,

@@ -730,6 +730,7 @@ footer { position: relative; z-index: 2; width: min(calc(100% - 36px),var(--max)
 .storage-card.compact small { grid-column: 1 / -1; }
 .storage-meter { position: relative; height: 9px; overflow: hidden; border-radius: 99px; background: #09090b; }
 .storage-meter i { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: linear-gradient(90deg,#5d9d70,#dcae59); }
+.r2-storage .storage-meter i { background: linear-gradient(90deg,#b9652f,#f0a15a); }
 .storage-meter b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #eee; box-shadow: 0 0 9px #fff8; }
 .storage-episodes { padding: 18px; border: 1px solid var(--line); border-radius: 19px; background: var(--surface); }
 .storage-list-heading { margin-bottom: 13px; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }

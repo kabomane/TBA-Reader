@@ -58,7 +58,7 @@ Entrer dans l’écran Stockage ne déclenche pas une nouvelle lecture. Le bouto
 - **Supabase Storage** : stockage principal des fichiers.
 - **Supabase Edge Functions** : validation du PIN et opérations privilégiées.
 - **Cloudflare R2** : stockage secondaire compatible S3.
-- **aws4fetch** : signature des envois directs vers R2 avec des identifiants temporaires.
+- **aws4fetch** : signature côté Edge Function des URL d’envoi direct vers R2.
 - **Firebase Hosting** : hébergement du build et réécriture SPA.
 - **localStorage** : cache vitrine, signets, corps Markdown récents et clé TBA chargée.
 - **react-markdown** et **remark-gfm** : rendu Markdown.
@@ -155,7 +155,7 @@ Le manifeste `data` suit cette forme :
 ### Tables de stockage
 
 - `tba_settings` : migration automatique, seuils, quota de référence, configuration privée R2 et état activé/désactivé.
-- `tba_storage_jobs` : état des copies Supabase ↔ R2 et reprise des erreurs.
+- `tba_storage_jobs` : état temporaire des copies Supabase ↔ R2 et reprise de la dernière erreur d’un épisode.
 - `tba_public_storage` : uniquement l’état public minimal de R2 et son URL publique.
 
 Les tables privées ont RLS activé et aucune politique publique. `tba_public_storage` expose seulement les valeurs nécessaires à la lecture des médias R2.
@@ -188,6 +188,8 @@ Cette stabilité permet de migrer sans réécrire les clés de chaque fichier. S
 ### Migration manuelle
 
 La migration manuelle est disponible uniquement dans **Infrastructure → Stockage**.
+
+Une seule tâche ouverte peut exister par épisode. Après vérification de la destination et nettoyage de la source, sa ligne est supprimée. En cas d’échec, seule la dernière erreur est conservée jusqu’à la tentative suivante ou à la suppression de l’épisode.
 
 1. L’Edge Function crée ou reprend un job.
 2. Le navigateur télécharge les fichiers depuis le fournisseur source.
@@ -223,6 +225,8 @@ Le formulaire Paramètres demande :
 
 La connexion R2 et son activation sont séparées. Le switch R2 est désactivé par défaut. Le couper bloque les nouveaux envois et les migrations vers R2 sans supprimer la configuration, le bucket ou les médias déjà publiés. Les retours de R2 vers Supabase restent possibles.
 
+L’écran Stockage compare le volume des épisodes enregistrés chez R2 aux 10 Go-mois inclus dans l’offre Standard. Cette jauge est un suivi instantané des épisodes connus par TBA Reader, pas le relevé de facturation mensuel Cloudflare.
+
 L’Edge Function :
 
 - vérifie le jeton ;
@@ -247,7 +251,7 @@ La fonction accepte uniquement `POST`. La passerelle Supabase ne vérifie pas de
 | `settings-save` | Enregistrer activation et seuils de migration. |
 | `change-pin` | Remplacer le hash du PIN dans Vault. |
 | `r2-setup` | Créer et connecter le bucket R2. |
-| `r2-credentials` | Produire des identifiants temporaires limités. |
+| `r2-upload-urls` | Produire des URL d’envoi signées et limitées aux objets de l’épisode. |
 | `sign-upload` | Créer une URL d’upload Supabase signée. |
 | `migration-supabase-sign` | Signer les objets lors d’un retour vers Supabase. |
 | `save` | Valider et enregistrer un épisode. |

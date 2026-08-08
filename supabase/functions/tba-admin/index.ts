@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.110.7";
+import { AwsClient } from "npm:aws4fetch@1.0.20";
 
 const SUPABASE_BUCKET = "tba-media";
 const MAX_SUPABASE_FILE_BYTES = 50_000_000;
@@ -211,9 +212,9 @@ async function r2WriteContext(supabase: ReturnType<typeof createClient>) {
   return context;
 }
 
-async function temporaryR2Credentials(supabase: ReturnType<typeof createClient>, objects: string[]) {
+async function r2UploadUrls(supabase: ReturnType<typeof createClient>, objects: string[]) {
   const { config, token } = await r2WriteContext(supabase);
-  const result = await cloudflareFetch(
+  const credentials = await cloudflareFetch(
     config.r2_account_id,
     token,
     `/accounts/${config.r2_account_id}/r2/temp-access-credentials`,
@@ -228,11 +229,19 @@ async function temporaryR2Credentials(supabase: ReturnType<typeof createClient>,
       }),
     },
   );
+  const signer = new AwsClient({
+    accessKeyId: credentials.accessKeyId,
+    secretAccessKey: credentials.secretAccessKey,
+    sessionToken: credentials.sessionToken,
+    region: "auto",
+    service: "s3",
+  });
   return {
-    ...result,
-    accountId: config.r2_account_id,
-    bucket: config.r2_bucket,
-    publicUrl: config.r2_public_url,
+    objects: await Promise.all(objects.map(async (key) => {
+      const url = `https://${config.r2_account_id}.r2.cloudflarestorage.com/${config.r2_bucket}/${encodeObjectKey(key)}`;
+      const signed = await signer.sign(url, { method: "PUT", aws: { signQuery: true } });
+      return { key, url: signed.url };
+    })),
   };
 }
 
@@ -452,13 +461,13 @@ Deno.serve(async (req) => {
       return json(req, { ok: true, bucket, publicUrl });
     }
 
-    if (payload.action === "r2-credentials") {
+    if (payload.action === "r2-upload-urls") {
       const episodeId = String(payload.episodeId ?? "");
       const objects = Array.isArray(payload.objects) ? payload.objects.map(String) : [];
       if (!technicalIdPattern.test(episodeId) || !objects.length || objects.some((key) => !validEpisodeKey(key, episodeId))) {
         return json(req, { error: "Chemins R2 invalides." }, 400);
       }
-      return json(req, await temporaryR2Credentials(supabase, objects));
+      return json(req, await r2UploadUrls(supabase, objects));
     }
 
     if (payload.action === "sign-upload") {
@@ -593,6 +602,9 @@ Deno.serve(async (req) => {
       } else {
         await r2WriteContext(supabase);
       }
+      const cleared = await supabase.from("tba_storage_jobs").delete()
+        .eq("episode_id", episodeId).eq("status", "error");
+      if (cleared.error) throw cleared.error;
       const { data: existing } = await supabase.from("tba_storage_jobs")
         .select("*").eq("episode_id", episodeId)
         .in("status", ["queued", "copying", "verifying", "committing", "cleanup"])
@@ -606,8 +618,17 @@ Deno.serve(async (req) => {
           status: "copying",
           manifest: data,
         }).select().single();
-        if (created.error) throw created.error;
-        job = created.data;
+        if (created.error?.code === "23505") {
+          const concurrent = await supabase.from("tba_storage_jobs")
+            .select("*").eq("episode_id", episodeId)
+            .in("status", ["queued", "copying", "verifying", "committing", "cleanup", "error"])
+            .single();
+          if (concurrent.error) throw created.error;
+          job = concurrent.data;
+        } else {
+          if (created.error) throw created.error;
+          job = created.data;
+        }
       }
       return json(req, { job, data });
     }
@@ -617,16 +638,21 @@ Deno.serve(async (req) => {
       const { data: job, error: jobError } = await supabase.from("tba_storage_jobs").select("*").eq("id", jobId).single();
       if (jobError) throw jobError;
       const data = normalizeMediaData(job.manifest, job.episode_id, job.manifest.youtube ?? null);
-      await supabase.from("tba_storage_jobs").update({ status: "verifying", updated_at: new Date().toISOString() }).eq("id", jobId);
+      const verifying = await supabase.from("tba_storage_jobs")
+        .update({ status: "verifying", updated_at: new Date().toISOString() }).eq("id", jobId);
+      if (verifying.error) throw verifying.error;
       if (job.target_provider === "r2") await verifyR2(supabase, mediaItems(data));
       else await verifySupabase(supabase, mediaItems(data));
       const total = mediaItems(data).reduce((sum, item) => sum + item.size, 0);
       const updated = await supabase.from("episodes").update({ storage_provider: job.target_provider, storage_bytes: total })
         .eq("id", job.episode_id).eq("storage_provider", job.source_provider);
       if (updated.error) throw updated.error;
-      await supabase.from("tba_storage_jobs").update({ status: "cleanup", updated_at: new Date().toISOString() }).eq("id", jobId);
+      const cleanup = await supabase.from("tba_storage_jobs")
+        .update({ status: "cleanup", updated_at: new Date().toISOString() }).eq("id", jobId);
+      if (cleanup.error) throw cleanup.error;
       await deleteObjects(supabase, job.source_provider, mediaItems(data).map((item) => item.key));
-      await supabase.from("tba_storage_jobs").update({ status: "complete", error: null, updated_at: new Date().toISOString() }).eq("id", jobId);
+      const removed = await supabase.from("tba_storage_jobs").delete().eq("episode_id", job.episode_id);
+      if (removed.error) throw removed.error;
       return json(req, { ok: true, provider: job.target_provider });
     }
 
