@@ -374,7 +374,7 @@ Deno.serve(async (req) => {
         return json(req, { error: "Configuration Cloudflare invalide." }, 400);
       }
 
-      await cloudflareFetch(accountId, token, "/user/tokens/verify");
+      await cloudflareFetch(accountId, token, `/accounts/${accountId}/tokens/verify`);
       try {
         await cloudflareFetch(accountId, token, `/accounts/${accountId}/r2/buckets`, {
           method: "POST",
