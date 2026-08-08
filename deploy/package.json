@@ -1,0 +1,11 @@
+{
+  "name": "tba-firebase-deploy",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "firebase": "firebase"
+  },
+  "devDependencies": {
+    "firebase-tools": "^14.0.0"
+  }
+}

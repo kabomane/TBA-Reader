@@ -1,0 +1,17 @@
+{
+  "hosting": {
+    "site": "tbizave-reader",
+    "public": "public-current",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}
