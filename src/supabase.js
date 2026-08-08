@@ -18,7 +18,7 @@ const EPISODE_COLUMNS = [
 ].join(",");
 
 const client = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
-let publicStorageConfig = { r2Ready: false, r2PublicUrl: "" };
+let publicStorageConfig = { r2Ready: false, r2Enabled: false, r2PublicUrl: "" };
 
 function getClient() {
   return client;
@@ -385,7 +385,11 @@ export async function renumberEpisodes(pin) {
 
 export async function getStorageStatus(pin) {
   const status = await adminRequest(pin, { action: "storage-status" });
-  if (status.settings?.r2PublicUrl) publicStorageConfig = { r2Ready: status.settings.r2Ready, r2PublicUrl: status.settings.r2PublicUrl };
+  if (status.settings?.r2PublicUrl) publicStorageConfig = {
+    r2Ready: status.settings.r2Ready,
+    r2Enabled: status.settings.r2Enabled,
+    r2PublicUrl: status.settings.r2PublicUrl,
+  };
   return status;
 }
 
@@ -395,7 +399,13 @@ export async function saveStorageSettings(settings, pin) {
 
 export async function setupR2(config, pin) {
   const result = await adminRequest(pin, { action: "r2-setup", ...config });
-  publicStorageConfig = { r2Ready: true, r2PublicUrl: result.publicUrl };
+  publicStorageConfig = { ...publicStorageConfig, r2Ready: true, r2PublicUrl: result.publicUrl };
+  return result;
+}
+
+export async function toggleR2(enabled, pin) {
+  const result = await adminRequest(pin, { action: "r2-toggle", enabled });
+  publicStorageConfig = { ...publicStorageConfig, r2Enabled: result.enabled };
   return result;
 }
 

@@ -154,7 +154,7 @@ Le manifeste `data` suit cette forme :
 
 ### Tables de stockage
 
-- `tba_settings` : migration automatique, seuils, quota de référence et configuration privée R2.
+- `tba_settings` : migration automatique, seuils, quota de référence, configuration privée R2 et état activé/désactivé.
 - `tba_storage_jobs` : état des copies Supabase ↔ R2 et reprise des erreurs.
 - `tba_public_storage` : uniquement l’état public minimal de R2 et son URL publique.
 
@@ -220,6 +220,8 @@ Le formulaire Paramètres demande :
 - un jeton API limité à R2 ;
 - l’Access Key ID parent ;
 - le nom du bucket.
+
+La connexion R2 et son activation sont séparées. Le switch R2 est désactivé par défaut. Le couper bloque les nouveaux envois et les migrations vers R2 sans supprimer la configuration, le bucket ou les médias déjà publiés. Les retours de R2 vers Supabase restent possibles.
 
 L’Edge Function :
 

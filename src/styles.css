@@ -752,6 +752,7 @@ footer { position: relative; z-index: 2; width: min(calc(100% - 36px),var(--max)
 .settings-card-heading h3 { margin: 4px 0 0; font: 600 24px var(--serif); }
 .settings-card-heading em { padding: 6px 9px; border-radius: 99px; background: #803d3525; color: #df8778; font-size: 9px; font-style: normal; }
 .settings-card-heading em.ready { background: #60a97720; color: #a8d1b4; }
+.settings-card-controls { display: flex; align-items: center; gap: 10px; }
 .settings-card > p { margin: -5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .settings-grid { display: grid; gap: 13px; }
 .settings-grid label { display: grid; gap: 7px; }
@@ -765,6 +766,7 @@ footer { position: relative; z-index: 2; width: min(calc(100% - 36px),var(--max)
 .switch i::after { content: ""; position: absolute; top: 4px; left: 4px; width: 18px; height: 18px; border-radius: 50%; background: var(--muted); transition: .2s ease; }
 .switch input:checked + i { border-color: #60a97780; background: #60a97725; }
 .switch input:checked + i::after { transform: translateX(21px); background: #7fc391; }
+.switch input:disabled + i { opacity: .42; cursor: not-allowed; }
 
 @media (min-width: 600px) {
   .filters { grid-template-columns: minmax(260px,1fr) 155px 155px; }

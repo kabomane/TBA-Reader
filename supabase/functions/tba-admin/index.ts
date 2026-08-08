@@ -205,8 +205,14 @@ async function r2Context(supabase: ReturnType<typeof createClient>) {
   return { config, token };
 }
 
+async function r2WriteContext(supabase: ReturnType<typeof createClient>) {
+  const context = await r2Context(supabase);
+  if (!context.config.r2_enabled) throw new Error("Cloudflare R2 est désactivé.");
+  return context;
+}
+
 async function temporaryR2Credentials(supabase: ReturnType<typeof createClient>, objects: string[]) {
-  const { config, token } = await r2Context(supabase);
+  const { config, token } = await r2WriteContext(supabase);
   const result = await cloudflareFetch(
     config.r2_account_id,
     token,
@@ -306,6 +312,7 @@ async function storageStatus(supabase: ReturnType<typeof createClient>) {
       targetPercent: config.target_percent,
       quotaBytes: Number(config.quota_bytes),
       r2Ready: config.r2_ready,
+      r2Enabled: config.r2_enabled,
       r2Bucket: config.r2_bucket,
       r2PublicUrl: config.r2_public_url,
     },
@@ -356,6 +363,25 @@ Deno.serve(async (req) => {
       }).eq("id", true);
       if (error) throw error;
       return json(req, { ok: true });
+    }
+
+    if (payload.action === "r2-toggle") {
+      const enabled = Boolean(payload.enabled);
+      if (enabled) {
+        const { config, token } = await r2Context(supabase);
+        await cloudflareFetch(config.r2_account_id, token, `/accounts/${config.r2_account_id}/tokens/verify`);
+        await cloudflareFetch(
+          config.r2_account_id,
+          token,
+          `/accounts/${config.r2_account_id}/r2/buckets/${encodeURIComponent(config.r2_bucket)}`,
+        );
+      }
+      const { error } = await supabase.from("tba_settings").update({
+        r2_enabled: enabled,
+        updated_at: new Date().toISOString(),
+      }).eq("id", true);
+      if (error) throw error;
+      return json(req, { ok: true, enabled });
     }
 
     if (payload.action === "change-pin") {
@@ -506,6 +532,7 @@ Deno.serve(async (req) => {
         }, episodeId, youtube);
         await verifySupabase(supabase, mediaItems(data));
       } else {
+        await r2WriteContext(supabase);
         data = normalizeMediaData(incoming.data, episodeId, youtube);
         await verifyR2(supabase, mediaItems(data));
       }
@@ -564,7 +591,7 @@ Deno.serve(async (req) => {
           return json(req, { error: `Retour impossible : limite de ${Math.round(limit * 100)} % dépassée.` }, 400);
         }
       } else {
-        await r2Context(supabase);
+        await r2WriteContext(supabase);
       }
       const { data: existing } = await supabase.from("tba_storage_jobs")
         .select("*").eq("episode_id", episodeId)

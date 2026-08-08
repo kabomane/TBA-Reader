@@ -23,6 +23,7 @@ import {
   saveEpisode as saveSupabaseEpisode,
   saveStorageSettings,
   setupR2,
+  toggleR2,
   verifyAdminPin,
   watchEpisodes,
 } from "./supabase.js";
@@ -782,9 +783,9 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
       </article>
       <article className="storage-card">
         <div><span>Cloudflare R2</span><strong>{formatBytes(status?.r2Bytes)}</strong><small>{config.r2Ready ? config.r2Bucket : "Non configuré"}</small></div>
-        <p>{config.r2Ready ? "Connexion opérationnelle" : "Configuration requise pour migrer"}</p>
+        <p>{!config.r2Ready ? "Configuration requise pour migrer" : config.r2Enabled ? "Connexion opérationnelle" : "Configuré · Désactivé"}</p>
       </article>
-      <article className="storage-card compact"><span>Migration automatique</span><strong>{config.autoMigrationEnabled ? "Active" : "Désactivée"}</strong><small>{config.autoMigrationEnabled ? `Retour visé : ${config.targetPercent}%` : "Activation dans Paramètres"}</small></article>
+      <article className="storage-card compact"><span>Migration automatique</span><strong>{config.autoMigrationEnabled && config.r2Enabled ? "Active" : config.autoMigrationEnabled ? "Suspendue" : "Désactivée"}</strong><small>{config.autoMigrationEnabled && config.r2Enabled ? `Retour visé : ${config.targetPercent}%` : config.autoMigrationEnabled ? "Cloudflare R2 est désactivé" : "Activation dans Paramètres"}</small></article>
       <article className="storage-card compact"><span>Fichiers orphelins</span><strong>{status?.orphan?.objects ?? 0}</strong><small>{formatBytes(status?.orphan?.bytes)}</small></article>
     </div>
     <div className="storage-episodes">
@@ -796,14 +797,14 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
         return <article className="storage-episode" key={episode.uid}>
           <div className={`provider-dot ${episode.storageProvider}`}/>
           <div><strong>TBA — {formatEpisodeNumber(episode.number)} · {episode.title}</strong><span>{formatBytes(episode.storageBytes)} · {episode.storageProvider === "r2" ? "Cloudflare R2" : "Supabase"}</span>{job?.error && <small>{job.error}</small>}</div>
-          <button type="button" onClick={() => onMigrate(episode, target)} disabled={busy || (target === "r2" && !config.r2Ready)}>{busy ? `${migrating?.current ?? 0}/${migrating?.total ?? 0}` : `Vers ${target === "r2" ? "R2" : "Supabase"}`}</button>
+          <button type="button" onClick={() => onMigrate(episode, target)} disabled={busy || (target === "r2" && !config.r2Enabled)}>{busy ? `${migrating?.current ?? 0}/${migrating?.total ?? 0}` : `Vers ${target === "r2" ? "R2" : "Supabase"}`}</button>
         </article>;
       })}
     </div>
   </section>;
 }
 
-function SettingsPanel({ status, busy, onSave, onSetupR2, onChangePin }) {
+function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePin }) {
   const [autoMigrationEnabled, setAutoMigrationEnabled] = useState(false);
   const [triggerPercent, setTriggerPercent] = useState(75);
   const [targetPercent, setTargetPercent] = useState(60);
@@ -828,12 +829,12 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onChangePin }) {
     {error && <p className="form-error">{error}</p>}
     <section className="settings-card">
       <div className="settings-card-heading"><div><span>Automatisation</span><h3>Migration selon le quota</h3></div><label className="switch"><input type="checkbox" checked={autoMigrationEnabled} onChange={(event) => setAutoMigrationEnabled(event.target.checked)}/><i/></label></div>
-      <p>Désactivée par défaut. Les fichiers supérieurs à 50 Mo utilisent toujours R2.</p>
+      <p>Désactivée par défaut. R2 doit être activé pour accepter un fichier supérieur à 50 Mo.</p>
       <div className="settings-grid"><label><span>Déclenchement (%)</span><input type="number" min="2" max="99" value={triggerPercent} onChange={(event) => setTriggerPercent(Number(event.target.value))}/></label><label><span>Objectif (%)</span><input type="number" min="1" max="98" value={targetPercent} onChange={(event) => setTargetPercent(Number(event.target.value))}/></label></div>
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSave({ autoMigrationEnabled, triggerPercent, targetPercent }), "Paramètres de stockage enregistrés.")}>Enregistrer</button>
     </section>
     <section className="settings-card">
-      <div className="settings-card-heading"><div><span>Cloudflare</span><h3>R2 automatique</h3></div><em className={status?.settings?.r2Ready ? "ready" : ""}>{status?.settings?.r2Ready ? "Connecté" : "À configurer"}</em></div>
+      <div className="settings-card-heading"><div><span>Cloudflare</span><h3>R2 automatique</h3></div><div className="settings-card-controls"><em className={status?.settings?.r2Enabled ? "ready" : ""}>{!status?.settings?.r2Ready ? "À configurer" : status.settings.r2Enabled ? "Actif" : "Désactivé"}</em><label className="switch"><input type="checkbox" aria-label="Activer Cloudflare R2" checked={Boolean(status?.settings?.r2Enabled)} disabled={busy || !status?.settings?.r2Ready} onChange={(event) => run(() => onToggleR2(event.target.checked), event.target.checked ? "Cloudflare R2 activé." : "Cloudflare R2 désactivé.")}/><i/></label></div></div>
       <p>L’assistant crée le bucket, configure CORS et active son adresse r2.dev.</p>
       <div className="settings-grid"><label><span>Account ID</span><input value={cloudflare.accountId} onChange={(event) => setCloudflare((old) => ({ ...old, accountId: event.target.value }))}/></label><label><span>Access Key ID parent</span><input value={cloudflare.parentAccessKeyId} onChange={(event) => setCloudflare((old) => ({ ...old, parentAccessKeyId: event.target.value }))}/></label><label className="wide"><span>Jeton API R2</span><input type="password" autoComplete="off" value={cloudflare.apiToken} onChange={(event) => setCloudflare((old) => ({ ...old, apiToken: event.target.value }))}/></label><label className="wide"><span>Nom du bucket</span><input value={cloudflare.bucket} onChange={(event) => setCloudflare((old) => ({ ...old, bucket: event.target.value.toLowerCase() }))}/></label></div>
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSetupR2(cloudflare), "Cloudflare R2 est prêt.")}>{status?.settings?.r2Ready ? "Tester et reconfigurer" : "Créer et connecter R2"}</button>
@@ -846,7 +847,7 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onChangePin }) {
   </section>;
 }
 
-function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onChangePin, onMigrate, onClose }) {
+function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pin, setPin] = useState("");
   const [checkingPin, setCheckingPin] = useState(false);
@@ -924,7 +925,7 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
     }
   };
   useEffect(() => {
-    if (!storageStatus?.settings?.autoMigrationEnabled || !storageStatus.settings.r2Ready || autoMigrationLock.current || migrating) return;
+    if (!storageStatus?.settings?.autoMigrationEnabled || !storageStatus.settings.r2Enabled || autoMigrationLock.current || migrating) return;
     const quota = Number(storageStatus.settings.quotaBytes || 1_000_000_000);
     const trigger = quota * Number(storageStatus.settings.triggerPercent || 75) / 100;
     if (Number(storageStatus.supabaseBytes) <= trigger) return;
@@ -1183,6 +1184,7 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
           busy={settingsBusy}
           onSave={async (nextSettings) => { setSettingsBusy(true); try { await onSaveStorageSettings(nextSettings, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onSetupR2={async (config) => { setSettingsBusy(true); try { await onSetupR2(config, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
+          onToggleR2={async (enabled) => { setSettingsBusy(true); try { await onToggleR2(enabled, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onChangePin={async (nextPin) => { setSettingsBusy(true); try { await onChangePin(nextPin, pin); setPin(nextPin); } finally { setSettingsBusy(false); } }}
         />}
     </div>
@@ -1433,7 +1435,7 @@ export default function App() {
       <div className="atmosphere" aria-hidden="true"/>
       <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={openAdmin} aria-label="Espace créateur"><Icon name="lock" size={16}/> Créer</button></header>
       <main>
-        {adminOpen ? <Admin episodes={fullSorted} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onVerifyPin={verifyAdminPin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => setAdminOpen(false)}/>
+        {adminOpen ? <Admin episodes={fullSorted} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onVerifyPin={verifyAdminPin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => setAdminOpen(false)}/>
           : readerView()}
       </main>
       {!adminOpen && <footer><div className="footer-brand"><Icon name="lock" size={14}/> TBA Reader</div><span>© 2026 — Bizave Corp.</span></footer>}
