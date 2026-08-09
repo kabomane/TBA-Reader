@@ -44,6 +44,7 @@ Le mode Infrastructure permet de :
 - migrer manuellement un épisode complet entre Supabase et R2 ;
 - configurer ou désactiver la migration automatique ;
 - connecter Cloudflare R2 ;
+- télécharger une archive ZIP locale de tous les épisodes Supabase et R2 ;
 - changer le PIN administrateur.
 
 Entrer dans l’écran Stockage ne déclenche pas une nouvelle lecture. Le bouton **Actualiser** lance explicitement le relevé.
@@ -59,6 +60,7 @@ Entrer dans l’écran Stockage ne déclenche pas une nouvelle lecture. Le bouto
 - **Supabase Edge Functions** : validation du PIN et opérations privilégiées.
 - **Cloudflare R2** : stockage secondaire compatible S3.
 - **aws4fetch** : signature côté Edge Function des URL d’envoi direct vers R2.
+- **zip.js** : création progressive de l’archive complète dans le navigateur.
 - **Firebase Hosting** : hébergement du build et réécriture SPA.
 - **localStorage** : cache vitrine, signets, corps Markdown récents et clé TBA chargée.
 - **react-markdown** et **remark-gfm** : rendu Markdown.
@@ -72,6 +74,7 @@ Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou Web
 ```text
 .
 ├── AGENTS.md
+├── clone.md
 ├── README.md
 ├── index.html
 ├── package.json
@@ -82,6 +85,7 @@ Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou Web
 ├── src/
 │   ├── App.jsx
 │   ├── accessKey.js
+│   ├── archive.js
 │   ├── main.jsx
 │   ├── markdown.js
 │   ├── styles.css
@@ -98,6 +102,7 @@ Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou Web
 ```
 
 - `src/` est la source du frontend.
+- `clone.md` explique comment rattacher une copie à de nouveaux services et domaines.
 - `supabase/migrations/` est la source de vérité du schéma.
 - `supabase/functions/tba-admin/` contient l’Edge Function d’administration.
 - `build/` est généré par Vite.
@@ -227,6 +232,12 @@ La connexion R2 et son activation sont séparées. Le switch R2 est désactivé 
 
 L’écran Stockage compare le volume des épisodes enregistrés chez R2 aux 10 Go-mois inclus dans l’offre Standard. Cette jauge est un suivi instantané des épisodes connus par TBA Reader, pas le relevé de facturation mensuel Cloudflare.
 
+### Archive locale
+
+L’écran Stockage peut produire une archive ZIP complète sans Edge Function. Le navigateur relit la liste actuelle, récupère uniquement les fichiers référencés chez Supabase ou R2 puis génère un `index.html` autonome, un `episode.json` sans hash privé et les médias de chaque épisode.
+
+Chrome et Edge peuvent écrire progressivement le ZIP vers le disque. Les autres navigateurs utilisent un Blob conservé en mémoire. Un fichier indisponible est omis et consigné dans `erreurs.txt` sans interrompre les autres épisodes. Cette opération ne modifie et ne supprime aucune donnée distante.
+
 L’Edge Function :
 
 - vérifie le jeton ;
@@ -341,6 +352,7 @@ npm run dev -- --host 0.0.0.0 --port 5174
 - Utiliser `http://localhost:5174` sur le poste qui exécute Vite pour tester le hachage des clés TBA.
 - L’adresse réseau permet les tests depuis téléphone et tablette, sauf les API exigeant HTTPS comme `crypto.subtle`.
 - Respecter systématiquement les procédures Vite de [`AGENTS.md`](./AGENTS.md).
+- Pour rattacher le projet à une nouvelle infrastructure complète, suivre [`clone.md`](./clone.md).
 
 ---
 
@@ -399,6 +411,8 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - Les seuils 75 % et 60 % sont appliqués.
 - R2 est inaccessible tant que sa configuration n’est pas validée.
 - Aucun canal ou WebSocket Realtime n’est ouvert.
+- Une archive contient l’index hors ligne, les métadonnées, le Markdown et les médias disponibles des deux fournisseurs.
+- La création d’une archive n’envoie aucune écriture et ne supprime aucun objet.
 - Les conseillers Supabase ne signalent aucune faille active liée aux nouvelles tables.
 
 ### Responsive
@@ -420,6 +434,8 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - Les signets et caches ne sont pas synchronisés entre appareils.
 - Les métadonnées Open Graph restent statiques pour tout le site.
 - Le retour vers Supabase est impossible si un objet dépasse 50 Mo.
+- Le repli Blob de l’archive peut utiliser beaucoup de mémoire sur mobile pour une bibliothèque volumineuse.
+- Une origine locale absente de la politique CORS R2 peut afficher un média mais ne peut pas l’ajouter au ZIP.
 
 ---
 

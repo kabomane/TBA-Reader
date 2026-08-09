@@ -111,6 +111,14 @@ async function fetchEpisodes() {
   return episodesResult.data.map(fromRow);
 }
 
+export async function getEpisodesSnapshot() {
+  return fetchEpisodes();
+}
+
+export function getPublicStorageUrl(provider, key) {
+  return publicMediaUrl(provider, key);
+}
+
 function readEpisodeBodyCache(episodeId) {
   try {
     const saved = JSON.parse(localStorage.getItem(`${EPISODE_BODY_CACHE_PREFIX}${episodeId}`));

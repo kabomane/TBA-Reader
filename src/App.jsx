@@ -765,6 +765,7 @@ function formatBytes(bytes = 0) {
 }
 
 function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigrate }) {
+  const [archive, setArchive] = useState({ running: false, message: "", errors: 0, current: 0, total: 0 });
   if (loading && !status) return <section className="storage-panel"><div className="storage-loading"><span className="button-spinner"/>Lecture du stockage…</div></section>;
   const config = status?.settings ?? {};
   const used = Number(status?.supabaseBytes ?? 0);
@@ -773,11 +774,30 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
   const r2Used = Number(status?.r2Bytes ?? 0);
   const r2Percent = Math.min(100, r2Used / R2_INCLUDED_BYTES * 100);
   const r2PercentLabel = r2Percent > 0 && r2Percent < 0.1 ? r2Percent.toFixed(2) : r2Percent.toFixed(1);
+  const archiveBytes = episodes.reduce((sum, episode) => sum + Number(episode.storageBytes || 0), 0);
   const jobByEpisode = new Map((status?.jobs ?? []).map((job) => [job.episode_id, job]));
+  const startArchive = async (event) => {
+    event.preventDefault();
+    if (archive.running) return;
+    setArchive({ running: true, message: "Préparation…", errors: 0, current: 0, total: 0 });
+    try {
+      const { downloadEpisodeArchive } = await import("./archive.js");
+      const result = await downloadEpisodeArchive({
+        onProgress: ({ current, total, label }) => setArchive((state) => ({ ...state, current, total, message: label })),
+      });
+      setArchive({ running: false, message: result.errors.length ? `Archive créée · ${result.errors.length} fichier${result.errors.length > 1 ? "s" : ""} manquant${result.errors.length > 1 ? "s" : ""}` : "Archive téléchargée", errors: result.errors.length, current: result.episodes, total: result.episodes });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        setArchive({ running: false, message: "Téléchargement annulé", errors: 0, current: 0, total: 0 });
+      } else {
+        setArchive({ running: false, message: error?.message || "Archive impossible", errors: 1, current: 0, total: 0 });
+      }
+    }
+  };
   return <section className="storage-panel">
     <header className="manage-heading storage-heading">
       <div><p className="eyebrow">Infrastructure</p><h2>Stockage</h2></div>
-      <button type="button" className="storage-refresh" onClick={onRefresh} disabled={loading}><Icon name="refresh" size={17}/>{loading ? "Actualisation…" : "Actualiser"}</button>
+      <button type="button" className="storage-refresh" onClick={onRefresh} disabled={loading}>{loading ? "Actualisation…" : "Actualiser"}</button>
     </header>
     <div className="storage-overview">
       <article className="storage-card primary-storage">
@@ -790,8 +810,15 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
         <div className="storage-meter"><i style={{ width: `${r2Percent}%`, minWidth: r2Used ? 3 : 0 }}/></div>
         <p>{r2PercentLabel} % utilisé · {!config.r2Ready ? "configuration requise" : config.r2Enabled ? "connexion opérationnelle" : "configuré · désactivé"}</p>
       </article>
-      <article className="storage-card compact"><span>Migration automatique</span><strong>{config.autoMigrationEnabled && config.r2Enabled ? "Active" : config.autoMigrationEnabled ? "Suspendue" : "Désactivée"}</strong><small>{config.autoMigrationEnabled && config.r2Enabled ? `Retour visé : ${config.targetPercent}%` : config.autoMigrationEnabled ? "Cloudflare R2 est désactivé" : "Activation dans Paramètres"}</small></article>
-      <article className="storage-card compact"><span>Fichiers orphelins</span><strong>{status?.orphan?.objects ?? 0}</strong><small>{formatBytes(status?.orphan?.bytes)}</small></article>
+      <article className="storage-card compact storage-status-card">
+        <span>Migration automatique</span><strong>{config.autoMigrationEnabled && config.r2Enabled ? "Active" : config.autoMigrationEnabled ? "Suspendue" : "Désactivée"}</strong>
+        <span>Fichiers orphelins</span><strong>{status?.orphan?.objects ?? 0} · {formatBytes(status?.orphan?.bytes)}</strong>
+      </article>
+      <article className="storage-card compact archive-card" id="telecharger-archive">
+        <span>Télécharger l’archive</span>
+        <a href="#telecharger-archive" onClick={startArchive} aria-disabled={archive.running} aria-busy={archive.running}>{archive.running ? `${archive.current}/${archive.total || "…"}` : "Télécharger"}</a>
+        <small className={archive.errors ? "error" : ""} aria-live="polite">{archive.message || `${episodes.length} épisode${episodes.length > 1 ? "s" : ""} · ${formatBytes(archiveBytes)}${typeof window.showSaveFilePicker === "function" ? "" : " · préparation en mémoire"}`}</small>
+      </article>
     </div>
     <div className="storage-episodes">
       <div className="storage-list-heading"><h3>Épisodes</h3><span>{episodes.length} au total</span></div>
