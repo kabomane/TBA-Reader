@@ -519,7 +519,6 @@ Deno.serve(async (req) => {
       let data: MediaData;
       if (provider === "supabase") {
         const markdown = String(payload.body ?? "");
-        if (!markdown.trim()) return json(req, { error: "Contenu de l’épisode requis." }, 400);
         const path = bodyPath(episodeId);
         const { error: bodyError } = await supabase.storage.from(SUPABASE_BUCKET).upload(
           path,

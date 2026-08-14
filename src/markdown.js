@@ -83,3 +83,26 @@ export function remarkDividers() {
 
   return transform;
 }
+
+export function remarkSubtext() {
+  const transform = (node) => {
+    if (!Array.isArray(node.children) || node.type === "code" || node.type === "inlineCode") return;
+
+    node.children.forEach((child) => {
+      if (child.type === "paragraph" && child.children?.[0]?.type === "text") {
+        const match = child.children[0].value.match(/^-#[\t ]+/);
+        if (match) {
+          child.children[0].value = child.children[0].value.slice(match[0].length);
+          child.data = {
+            ...(child.data ?? {}),
+            hName: "p",
+            hProperties: { className: ["markdown-subtext"] },
+          };
+        }
+      }
+      transform(child);
+    });
+  };
+
+  return transform;
+}

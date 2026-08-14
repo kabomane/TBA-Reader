@@ -1,6 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   ACCESS_KEY_LENGTH,
   accessKeyRaw,
@@ -11,7 +9,7 @@ import {
   readAccessToken,
   storeAccessToken,
 } from "./accessKey.js";
-import { remarkAccent, remarkDividers } from "./markdown.js";
+import { MarkdownBody } from "./MarkdownBody.jsx";
 import {
   EPISODE_REFRESH_INTERVAL_MS,
   changeAdminPin,
@@ -31,6 +29,7 @@ import {
 const BOOKMARKS_KEY = "tba-bookmarks-v1";
 const R2_INCLUDED_BYTES = 10_000_000_000;
 const SHOWCASE_CACHE_KEY = "tba-showcase-cache-v1";
+const MarkdownEditor = lazy(() => import("./MarkdownEditor.jsx").then((module) => ({ default: module.MarkdownEditor })));
 const FORMAT_OPTIONS = [
   { value: "Tous", label: "Tous" },
   { value: "Vidéo", label: "Vidéo" },
@@ -100,24 +99,6 @@ function youtubeId(url = "") {
     return "";
   }
   return "";
-}
-
-function MarkdownBody({ children }) {
-  const markdown = children.replace(/^[\t ]*(---[^\n]*)[\t ]*$/gm, "\n\n$1\n\n");
-  return <ReactMarkdown
-    remarkPlugins={[remarkGfm, remarkAccent, remarkDividers]}
-    components={{
-      h1: ({ node, ...props }) => <h2 className="markdown-heading markdown-title-1" {...props}/>,
-      h2: ({ node, ...props }) => <h3 className="markdown-heading markdown-title-2" {...props}/>,
-      h3: ({ node, ...props }) => <h4 className="markdown-heading markdown-title-3" {...props}/>,
-      table: ({ node, ...props }) => <div className="markdown-table-wrap"><table {...props}/></div>,
-      a: ({ node, href = "", ...props }) => /^https?:\/\//i.test(href)
-        ? <a href={href} target="_blank" rel="noopener noreferrer" {...props}/>
-        : <span className="markdown-link-disabled" {...props}/>,
-    }}
-  >
-    {markdown}
-  </ReactMarkdown>;
 }
 
 function makeNumber(episodes) {
@@ -495,6 +476,8 @@ function AudioPlayer({ src }) {
 
 function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark }) {
   const video = youtubeId(episode.youtube);
+  const hasBody = Boolean(episode.body?.trim());
+  const hasContent = Boolean(video || episode.audio || hasBody);
   return (
     <article className="episode-page">
       <button className="back" onClick={onBack}><Icon name="back"/> Retour</button>
@@ -505,12 +488,12 @@ function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark }) {
         <div className="metadata"><span>{displayType(episode.type)}</span><span>{episode.duration}</span><span>{displayDate(episode.date)}</span></div>
         <Tags tags={episode.tags} onTag={onTag}/>
       </div></div>
-      <div className="episode-body">
+      {hasContent && <div className="episode-body">
         <div className="content-divider" aria-hidden="true"><span>Contenu</span><i/></div>
         {video && <div className="video"><iframe src={`https://www.youtube-nocookie.com/embed/${video}`} title={episode.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen/></div>}
         {episode.audio && <AudioPlayer src={episode.audio}/>}
-        <div className="prose"><MarkdownBody>{episode.body || ""}</MarkdownBody></div>
-      </div>
+        {hasBody && <div className="prose"><MarkdownBody>{episode.body}</MarkdownBody></div>}
+      </div>}
     </article>
   );
 }
@@ -879,13 +862,14 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
   </section>;
 }
 
-function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
+function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
   const [unlocked, setUnlocked] = useState(false);
   const [pin, setPin] = useState("");
   const [checkingPin, setCheckingPin] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState("create");
   const [editingId, setEditingId] = useState("");
+  const setMarkdownOpen = onMarkdownOpenChange;
   const [manageQuery, setManageQuery] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
@@ -988,7 +972,7 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
   const submit = async (event) => {
     event.preventDefault();
     if (savingLock.current) return;
-    if (!form.title.trim() || !form.description.trim() || !form.body.trim()) return setError("Titre, description et contenu requis.");
+    if (!form.title.trim() || !form.description.trim()) return setError("Titre et description requis.");
     if (form.accessKey && !isValidAccessKey(form.accessKey)) return setError("La clé d’accès doit respecter le format TBA-ABC1-23.");
     const previous = episodes.find((episode) => episode.id === editingId);
     if (!previous && !pendingIdentity.current) {
@@ -1021,6 +1005,7 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
       if (imagePreview) URL.revokeObjectURL(imagePreview);
       setNotice(previous ? "Modifications enregistrées." : "Épisode publié.");
       setEditingId("");
+      setMarkdownOpen(false);
       pendingIdentity.current = null;
       setForm(initial);
       setError("");
@@ -1033,7 +1018,7 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
       setSaving(false);
     }
   };
-  const startCreate = () => { setEditingId(""); pendingIdentity.current = null; setForm(initial); setError(""); setNotice(""); setTab("create"); };
+  const startCreate = () => { setEditingId(""); setMarkdownOpen(false); pendingIdentity.current = null; setForm(initial); setError(""); setNotice(""); setTab("create"); };
   const startEdit = async (episode) => {
     if (loadingEditId) return;
     try {
@@ -1041,6 +1026,7 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
       setError("");
       const detailedEpisode = await onLoadEpisode(episode);
       setEditingId(detailedEpisode.id);
+      setMarkdownOpen(false);
       setForm({ title: detailedEpisode.title, description: detailedEpisode.description, body: detailedEpisode.body, type: detailedEpisode.type, date: detailedEpisode.date, duration: detailedEpisode.duration, tags: detailedEpisode.tags.join(", "), youtube: detailedEpisode.youtube || "", image: detailedEpisode.image || "", imagePath: detailedEpisode.imagePath || "", imageFile: null, imagePreview: "", audio: detailedEpisode.audio || "", audioPath: detailedEpisode.audioPath || "", audioFile: null, token: detailedEpisode.token || "", accessKey: "", tokenAction: "keep" });
       setNotice("");
       setTab("create");
@@ -1100,6 +1086,13 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
       </div>
     </section>
   );
+  if (markdownOpen) return <Suspense fallback={<div className="markdown-editor-loading" aria-label="Chargement de l’éditeur" aria-busy="true"><span className="button-spinner"/></div>}>
+    <MarkdownEditor
+      value={form.body}
+      onValidate={(body) => { update("body", body); setMarkdownOpen(false); }}
+      onCancel={() => setMarkdownOpen(false)}
+    />
+  </Suspense>;
   return (
     <div className="admin-page">
       <button className="back" onClick={onClose}><Icon name="back"/> Quitter l’administration</button>
@@ -1135,8 +1128,8 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
           </div>
         </section>
         <section className="editor-section">
-          <div className="section-label"><span>02</span><div><h3>Contenu</h3><p>Corps complet épisode.</p></div></div>
-          <label><span>Texte Markdown *</span><textarea rows="9" value={form.body} onChange={(e) => update("body", e.target.value)} placeholder="Une ligne vide crée un paragraphe."/></label>
+          <div className="section-label"><span>02</span><div><h3>Contenu Markdown</h3><p>Corps complet de l’épisode.</p></div></div>
+          <button className="body-editor-button" type="button" onClick={() => setMarkdownOpen(true)}>{form.body?.trim() ? "Modifier le contenu" : "Rédiger le contenu"}</button>
         </section>
         <section className="editor-section">
           <div className="section-label"><span>03</span><div><h3>Classement</h3><p>Date et sujets alimentent archive automatiquement.</p></div></div>
@@ -1187,7 +1180,7 @@ function Admin({ episodes, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpis
         </section>
         {form.title && <section className="editor-section preview-section"><div className="section-label"><span>06</span><div><h3>Aperçu</h3><p>Rendu card public, sans action.</p></div></div><div className="editor-preview"><EpisodeCard preview episode={{ ...form, image: form.imagePreview || form.image, number: episodes.find((episode) => episode.id === editingId)?.number || makeNumber(episodes), tags: form.tags.split(/[,#]/).map((item) => item.trim()).filter(Boolean), duration: form.duration || "5 min", palette: episodes.length % 6 }}/></div></section>}
         {error && <p className="form-error">{error}</p>}
-        <div className="editor-actions">{editingId && <button className="ghost-button" type="button" onClick={startCreate} disabled={saving}>Annuler modification</button>}<button className="primary" type="submit" disabled={saving} aria-busy={saving}>{saving ? <><span className="button-spinner" aria-hidden="true"/>Envoi vers Supabase…</> : <><Icon name={editingId ? "arrow" : "plus"}/>{editingId ? "Enregistrer" : "Publier épisode"}</>}</button></div>
+        <div className="editor-actions">{editingId && <button className="ghost-button" type="button" onClick={startCreate} disabled={saving}>Annuler modification</button>}<button className="primary" type="submit" disabled={saving} aria-busy={saving}>{saving ? <><span className="button-spinner" aria-hidden="true"/>Envoi vers Supabase…</> : <><Icon name={editingId ? "arrow" : "plus"}/>{editingId ? "Enregistrer les modifications" : "Publier l’épisode"}</>}</button></div>
       </form> : tab === "manage" ? <section className="manage">
         <header className="manage-heading">
           <div><p className="eyebrow">Bibliothèque</p><h2>Gérer épisodes</h2></div>
@@ -1240,6 +1233,7 @@ export default function App() {
   const [view, setView] = useState(initialRoute.current.view);
   const [selectedId, setSelectedId] = useState(initialRoute.current.episodeId);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [adminMarkdownOpen, setAdminMarkdownOpen] = useState(false);
   const [archiveTag, setArchiveTag] = useState(initialRoute.current.tag);
   const [bookmarks, setBookmarks] = useState(() => {
     try {
@@ -1346,6 +1340,7 @@ export default function App() {
       setSelectedId(route.episodeId);
       setArchiveTag(route.tag);
       setAdminOpen(false);
+      setAdminMarkdownOpen(false);
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -1363,6 +1358,7 @@ export default function App() {
     setSelectedId(episodeId);
     setArchiveTag(tag);
     setAdminOpen(false);
+    setAdminMarkdownOpen(false);
   };
   const openEpisode = (episode) => goTo("episode", episode.id);
   const navigate = (next) => goTo(next);
@@ -1381,6 +1377,7 @@ export default function App() {
     }
   };
   const openAdmin = () => {
+    setAdminMarkdownOpen(false);
     setAdminOpen(true);
     refreshEpisodesRef.current?.();
   };
@@ -1465,9 +1462,9 @@ export default function App() {
   return (
     <div className="app">
       <div className="atmosphere" aria-hidden="true"/>
-      <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={openAdmin} aria-label="Espace créateur"><Icon name="lock" size={16}/> Créer</button></header>
+      {!adminMarkdownOpen && <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={openAdmin} aria-label="Espace créateur"><Icon name="lock" size={16}/> Créer</button></header>}
       <main>
-        {adminOpen ? <Admin episodes={fullSorted} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onVerifyPin={verifyAdminPin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => setAdminOpen(false)}/>
+        {adminOpen ? <Admin episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onVerifyPin={verifyAdminPin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
           : readerView()}
       </main>
       {!adminOpen && <footer><div className="footer-brand"><Icon name="lock" size={14}/> TBA Reader</div><span>© 2026 — Bizave Corp.</span></footer>}

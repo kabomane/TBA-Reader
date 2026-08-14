@@ -32,7 +32,7 @@ Le mode Contenu permet de :
 
 - créer et modifier un épisode ;
 - envoyer une image ou un audio ;
-- rédiger le corps Markdown ;
+- rédiger le corps Markdown dans un atelier dédié, ou le laisser vide ;
 - ajouter une vidéo YouTube ;
 - définir une clé d’accès visuelle ;
 - rechercher, renuméroter et supprimer les épisodes.
@@ -84,6 +84,9 @@ Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou Web
 ├── scripts/
 ├── src/
 │   ├── App.jsx
+│   ├── MarkdownBody.jsx
+│   ├── MarkdownEditor.css
+│   ├── MarkdownEditor.jsx
 │   ├── accessKey.js
 │   ├── archive.js
 │   ├── main.jsx
@@ -304,12 +307,14 @@ Ce filtrage est une fonction de présentation adaptée au projet familial : il n
 Le corps de l’épisode reste un fichier `body.md`. Le rendu prend en charge :
 
 - titres et paragraphes ;
-- gras, italique et liens HTTP/HTTPS ;
+- sous-textes `-#`, gras, italique, barré et liens HTTP/HTTPS ;
+- listes à puces, listes numérotées, cases à cocher, citations et blocs de code ;
+- images avec repli lisible lorsqu’une source est indisponible ;
 - tableaux GFM avec défilement horizontal sur téléphone ;
 - `==texte accentué==` ;
 - séparateurs `---` et `---Libellé`.
 
-Le HTML brut n’est pas activé. Les lecteurs audio prennent en charge MP3 et M4A avec progression et vitesses de lecture.
+Le HTML brut n’est pas activé. Le corps est optionnel lors de la publication, mais son fichier `body.md` est toujours créé, même vide. Les lecteurs audio prennent en charge MP3 et M4A avec progression et vitesses de lecture.
 
 ---
 
