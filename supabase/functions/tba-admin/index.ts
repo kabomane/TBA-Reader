@@ -7,6 +7,8 @@ const technicalIdPattern = /^[a-zA-Z0-9-]{3,64}$/;
 const shareIdPattern = /^[a-z0-9]{8}$/;
 const accessTokenPattern = /^[0-9a-f]{16}$/;
 const bucketPattern = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
+const cloudflareZoneIdPattern = /^[a-f0-9]{32}$/;
+const hostnamePattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
 const attempts = new Map<string, { count: number; blockedUntil: number }>();
 
 type Provider = "supabase" | "r2";
@@ -212,6 +214,31 @@ async function r2WriteContext(supabase: ReturnType<typeof createClient>) {
   return context;
 }
 
+async function activateR2CustomDomain(supabase: ReturnType<typeof createClient>, domain: string, zoneId: string) {
+  const { config, token } = await r2Context(supabase);
+  const basePath = `/accounts/${config.r2_account_id}/r2/buckets/${encodeURIComponent(config.r2_bucket)}/domains/custom`;
+  const listed = await cloudflareFetch(config.r2_account_id, token, basePath);
+  const exists = Array.isArray(listed?.domains) && listed.domains.some((item: { domain?: string }) => item.domain === domain);
+  if (!exists) {
+    await cloudflareFetch(config.r2_account_id, token, basePath, {
+      method: "POST",
+      body: JSON.stringify({ domain, zoneId, enabled: true, minTLS: "1.2" }),
+    });
+  }
+
+  const detail = await cloudflareFetch(config.r2_account_id, token, `${basePath}/${encodeURIComponent(domain)}`);
+  const active = detail?.enabled === true && detail?.status?.ownership === "active" && detail?.status?.ssl === "active";
+  if (!active) return { active: false, status: detail?.status ?? null };
+
+  const publicUrl = `https://${domain}`;
+  const now = new Date().toISOString();
+  const { error } = await supabase.from("tba_settings").update({ r2_public_url: publicUrl, updated_at: now }).eq("id", true);
+  if (error) throw error;
+  const { error: publicConfigError } = await supabase.from("tba_public_storage").update({ r2_public_url: publicUrl }).eq("id", true);
+  if (publicConfigError) throw publicConfigError;
+  return { active: true, publicUrl, status: detail.status };
+}
+
 async function r2UploadUrls(supabase: ReturnType<typeof createClient>, objects: string[]) {
   const { config, token } = await r2WriteContext(supabase);
   const credentials = await cloudflareFetch(
@@ -391,6 +418,15 @@ Deno.serve(async (req) => {
       }).eq("id", true);
       if (error) throw error;
       return json(req, { ok: true, enabled });
+    }
+
+    if (payload.action === "r2-custom-domain") {
+      const domain = String(payload.domain ?? "").trim().toLowerCase();
+      const zoneId = String(payload.zoneId ?? "").trim().toLowerCase();
+      if (!hostnamePattern.test(domain) || !cloudflareZoneIdPattern.test(zoneId)) {
+        return json(req, { error: "Domaine ou Zone ID Cloudflare invalide." }, 400);
+      }
+      return json(req, await activateR2CustomDomain(supabase, domain, zoneId));
     }
 
     if (payload.action === "change-pin") {
