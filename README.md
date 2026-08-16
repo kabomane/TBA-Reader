@@ -241,6 +241,8 @@ L’écran Stockage peut produire une archive ZIP complète sans Edge Function. 
 
 Chrome et Edge peuvent écrire progressivement le ZIP vers le disque. Les autres navigateurs utilisent un Blob conservé en mémoire. Un fichier indisponible est omis et consigné dans `erreurs.txt` sans interrompre les autres épisodes. Cette opération ne modifie et ne supprime aucune donnée distante.
 
+Pour utiliser un domaine R2 en production, renseignez le domaine et le **Zone ID** de la zone Cloudflare dans **Paramètres → Domaine public R2**. La première demande enregistre le domaine ; créez ensuite l’entrée DNS demandée par Cloudflare et relancez la même action seulement lorsque les états d’ownership et SSL sont actifs. L’URL publique n’est remplacée qu’après cette validation, ce qui laisse les médias existants lisibles pendant la transition.
+
 L’Edge Function :
 
 - vérifie le jeton ;
@@ -265,6 +267,7 @@ La fonction accepte uniquement `POST`. La passerelle Supabase ne vérifie pas de
 | `settings-save` | Enregistrer activation et seuils de migration. |
 | `change-pin` | Remplacer le hash du PIN dans Vault. |
 | `r2-setup` | Créer et connecter le bucket R2. |
+| `r2-custom-domain` | Enregistrer puis activer un domaine personnalisé R2 lorsque son DNS et TLS sont actifs. |
 | `r2-upload-urls` | Produire des URL d’envoi signées et limitées aux objets de l’épisode. |
 | `sign-upload` | Créer une URL d’upload Supabase signée. |
 | `migration-supabase-sign` | Signer les objets lors d’un retour vers Supabase. |
@@ -314,7 +317,7 @@ Le corps de l’épisode reste un fichier `body.md`. Le rendu prend en charge :
 - `==texte accentué==` ;
 - séparateurs `---` et `---Libellé`.
 
-Le HTML brut n’est pas activé. Le corps est optionnel lors de la publication, mais son fichier `body.md` est toujours créé, même vide. Les lecteurs audio prennent en charge MP3 et M4A avec progression et vitesses de lecture.
+Le HTML brut n’est pas activé. Le corps est optionnel lors de la publication : lorsqu’il est vide, l’application écrit le marqueur invisible `<!-- {NOTHING} -->` dans `body.md`, afin que le fichier ne soit jamais vide sans rien afficher au lecteur. Les lecteurs audio prennent en charge MP3, AAC et M4A AAC avec progression et vitesses de lecture. Avant l’envoi, un M4A ALAC (Apple Lossless) est refusé car Chrome ne peut pas le lire ; il doit être exporté en AAC, en M4A AAC-LC ou en MP3.
 
 ---
 

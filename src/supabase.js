@@ -8,6 +8,8 @@ const EPISODE_REQUEST_TIMEOUT = 8000;
 const EPISODE_RETRY_DELAY = 1200;
 const EPISODE_RECOVERY_DELAY = 15000;
 const EPISODE_BODY_CACHE_PREFIX = "tba-episode-body-v1:";
+// Un commentaire Markdown/HTML est stocké pour les épisodes sans texte, sans rien afficher au lecteur.
+const EMPTY_EPISODE_BODY = "<!-- {NOTHING} -->";
 export const EPISODE_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
 
 const EPISODE_COLUMNS = [
@@ -37,6 +39,19 @@ function publicMediaUrl(provider, key) {
 
 function episodeBodyPath(episodeId) {
   return `episodes/${episodeId}/body.md`;
+}
+
+function storageBody(body) {
+  return String(body ?? "").trim() ? String(body) : EMPTY_EPISODE_BODY;
+}
+
+function readerBody(body) {
+  return String(body ?? "").trim() === EMPTY_EPISODE_BODY ? "" : String(body ?? "");
+}
+
+function fileMime(file) {
+  if (/\.aac$/i.test(file?.name || "")) return "audio/aac";
+  return file?.type || "application/octet-stream";
 }
 
 function normalizeRowData(row) {
@@ -152,7 +167,7 @@ async function fetchEpisodeBody(episode) {
   const path = episode.storageData?.body?.key || episodeBodyPath(episode.uid);
   const response = await fetch(publicMediaUrl(episode.storageProvider, path));
   if (!response.ok) throw new Error("Contenu de l’épisode indisponible.");
-  const body = await response.text();
+  const body = readerBody(await response.text());
   writeEpisodeBodyCache(episode.uid, body);
   return body;
 }
@@ -260,10 +275,10 @@ async function uploadSupabaseFile(episodeId, kind, file, pin) {
   const signed = await adminRequest(pin, { action: "sign-upload", episodeId, kind, filename: safeFilename(file.name) });
   const { error } = await getClient().storage.from(MEDIA_BUCKET).uploadToSignedUrl(signed.path, signed.token, file, {
     cacheControl: "3600",
-    contentType: file.type || undefined,
+    contentType: fileMime(file),
   });
   if (error) throw error;
-  return { key: signed.path, size: file.size, mime: file.type || "application/octet-stream", etag: null };
+  return { key: signed.path, size: file.size, mime: fileMime(file), etag: null };
 }
 
 function mediaKey(episodeId, kind, filename) {
@@ -307,7 +322,7 @@ async function uploadR2Items(episodeId, items, pin) {
 
 async function buildR2Data(episode, files, pin) {
   const switching = episode.storageProvider !== "r2";
-  const bodyBlob = new Blob([episode.body], { type: "text/markdown;charset=utf-8" });
+  const bodyBlob = new Blob([storageBody(episode.body)], { type: "text/markdown;charset=utf-8" });
   const uploads = [{ key: episodeBodyPath(episode.uid), blob: bodyBlob, kind: "body" }];
   const next = { youtube: episode.youtube || null, body: null, image: null, audio: null };
 
@@ -316,7 +331,7 @@ async function buildR2Data(episode, files, pin) {
     const existingItem = episode.storageData?.[kind] ?? null;
     const existingUrl = episode[kind] || "";
     if (file) {
-      uploads.push({ key: mediaKey(episode.uid, kind, file.name), blob: file, kind });
+      uploads.push({ key: mediaKey(episode.uid, kind, file.name), blob: file, kind, mime: fileMime(file) });
     } else if (episode[`${kind}Path`] && switching) {
       uploads.push({ key: episode[`${kind}Path`], blob: await fetchBlob(existingUrl, kind), kind });
     } else if (episode[`${kind}Path`] && existingItem) {
@@ -352,10 +367,11 @@ export async function saveEpisode(episode, files = {}, pin) {
     };
   }
 
+  const body = storageBody(episode.body);
   const result = await adminRequest(pin, {
     action: "save",
     episode: toRow(episode, provider, data),
-    body: provider === "supabase" ? episode.body : undefined,
+    body: provider === "supabase" ? body : undefined,
   });
   writeEpisodeBodyCache(episode.uid, episode.body);
   return {
@@ -397,6 +413,14 @@ export async function saveStorageSettings(settings, pin) {
 export async function setupR2(config, pin) {
   const result = await adminRequest(pin, { action: "r2-setup", ...config });
   publicStorageConfig = { ...publicStorageConfig, r2Ready: true, r2PublicUrl: result.publicUrl };
+  return result;
+}
+
+export async function setupR2CustomDomain(domain, zoneId, pin) {
+  const result = await adminRequest(pin, { action: "r2-custom-domain", domain, zoneId });
+  if (result.active && result.publicUrl) {
+    publicStorageConfig = { ...publicStorageConfig, r2Ready: true, r2PublicUrl: result.publicUrl };
+  }
   return result;
 }
 

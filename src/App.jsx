@@ -10,6 +10,7 @@ import {
   storeAccessToken,
 } from "./accessKey.js";
 import { MarkdownBody } from "./MarkdownBody.jsx";
+import { validateAudioFile } from "./media.js";
 import {
   EPISODE_REFRESH_INTERVAL_MS,
   changeAdminPin,
@@ -21,6 +22,7 @@ import {
   saveEpisode as saveSupabaseEpisode,
   saveStorageSettings,
   setupR2,
+  setupR2CustomDomain,
   toggleR2,
   verifyAdminPin,
   watchEpisodes,
@@ -28,6 +30,7 @@ import {
 
 const BOOKMARKS_KEY = "tba-bookmarks-v1";
 const R2_INCLUDED_BYTES = 10_000_000_000;
+const MAX_SUPABASE_FILE_BYTES = 50_000_000;
 const SHOWCASE_CACHE_KEY = "tba-showcase-cache-v1";
 const MarkdownEditor = lazy(() => import("./MarkdownEditor.jsx").then((module) => ({ default: module.MarkdownEditor })));
 const FORMAT_OPTIONS = [
@@ -444,10 +447,18 @@ function AudioPlayer({ src }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [rate, setRate] = useState(1);
+  const [audioError, setAudioError] = useState("");
   const toggle = async () => {
     if (!audio.current) return;
     if (playing) audio.current.pause();
-    else await audio.current.play();
+    else {
+      try {
+        setAudioError("");
+        await audio.current.play();
+      } catch {
+        setAudioError("Ce fichier audio n’est pas compatible avec ce navigateur. Réencode-le en MP3, AAC ou M4A AAC.");
+      }
+    }
   };
   const changeRate = (nextRate) => {
     setRate(nextRate);
@@ -462,11 +473,12 @@ function AudioPlayer({ src }) {
   return (
     <div className="audio-block">
       <div className="audio-player">
-        <audio ref={audio} src={src} preload="none" onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={(event) => { setPlaying(false); syncAudioTime(event.currentTarget); }} onLoadedMetadata={(event) => syncAudioTime(event.currentTarget)} onDurationChange={(event) => syncAudioTime(event.currentTarget)} onTimeUpdate={(event) => syncAudioTime(event.currentTarget)}/>
+        <audio ref={audio} src={src} preload="none" onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onError={() => setAudioError("Ce fichier audio n’est pas compatible avec ce navigateur. Réencode-le en MP3, AAC ou M4A AAC.")} onEnded={(event) => { setPlaying(false); syncAudioTime(event.currentTarget); }} onLoadedMetadata={(event) => syncAudioTime(event.currentTarget)} onDurationChange={(event) => syncAudioTime(event.currentTarget)} onTimeUpdate={(event) => syncAudioTime(event.currentTarget)}/>
         <button onClick={toggle} aria-label={playing ? "Pause" : "Lecture"}><Icon name={playing ? "pause" : "play"}/></button>
         <div className="audio-line" onClick={(event) => { if (!audio.current || !Number.isFinite(audio.current.duration)) return; const rect = event.currentTarget.getBoundingClientRect(); audio.current.currentTime = ((event.clientX - rect.left) / rect.width) * audio.current.duration; syncAudioTime(audio.current); }}><i style={{ width: `${progress}%` }}/></div>
         <span className="audio-time">{formatAudioTime(currentTime)} / {formatAudioTime(duration)}</span>
       </div>
+      {audioError && <p className="form-error" role="alert">{audioError}</p>}
       <div className="audio-speeds" aria-label="Vitesse de lecture">
         {[1, 1.5, 2].map((speed) => <button type="button" className={rate === speed ? "active" : ""} onClick={() => changeRate(speed)} aria-pressed={rate === speed} key={speed}>x{String(speed).replace(".", ",")}</button>)}
       </div>
@@ -809,21 +821,26 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
         const job = jobByEpisode.get(episode.uid);
         const busy = migrating?.episodeId === episode.uid || (job && job.status !== "error");
         const target = episode.storageProvider === "r2" ? "supabase" : "r2";
+        const tooLargeForSupabase = target === "supabase" && [episode.storageData?.body, episode.storageData?.image, episode.storageData?.audio]
+          .filter(Boolean)
+          .some((item) => Number(item.size ?? 0) > MAX_SUPABASE_FILE_BYTES);
         return <article className="storage-episode" key={episode.uid}>
           <div className={`provider-dot ${episode.storageProvider}`}/>
-          <div><strong>TBA — {formatEpisodeNumber(episode.number)} · {episode.title}</strong><span>{formatBytes(episode.storageBytes)} · {episode.storageProvider === "r2" ? "Cloudflare R2" : "Supabase"}</span>{job?.error && <small>{job.error}</small>}</div>
-          <button type="button" onClick={() => onMigrate(episode, target)} disabled={busy || (target === "r2" && !config.r2Enabled)}>{busy ? `${migrating?.current ?? 0}/${migrating?.total ?? 0}` : `Vers ${target === "r2" ? "R2" : "Supabase"}`}</button>
+          <div><strong>TBA — {formatEpisodeNumber(episode.number)} · {episode.title}</strong><span>{formatBytes(episode.storageBytes)} · {episode.storageProvider === "r2" ? "Cloudflare R2" : "Supabase"}</span>{tooLargeForSupabase && <small>Retour vers Supabase impossible : un fichier dépasse 50 Mo.</small>}{job?.error && <small>{job.error}</small>}</div>
+          <button type="button" className={busy ? "is-busy" : ""} onClick={() => onMigrate(episode, target)} disabled={busy || tooLargeForSupabase || (target === "r2" && !config.r2Enabled)} aria-busy={busy}>{busy ? `${migrating?.current ?? 0}/${migrating?.total ?? 0}` : `Vers ${target === "r2" ? "R2" : "Supabase"}`}</button>
         </article>;
       })}
     </div>
   </section>;
 }
 
-function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePin }) {
+function SettingsPanel({ status, busy, onSave, onSetupR2, onSetupR2CustomDomain, onToggleR2, onChangePin }) {
   const [autoMigrationEnabled, setAutoMigrationEnabled] = useState(false);
   const [triggerPercent, setTriggerPercent] = useState(75);
   const [targetPercent, setTargetPercent] = useState(60);
   const [cloudflare, setCloudflare] = useState({ accountId: "", apiToken: "", parentAccessKeyId: "", bucket: "tba-reader-media" });
+  const [customDomain, setCustomDomain] = useState("cr2.bizave.kabomane.me");
+  const [zoneId, setZoneId] = useState("");
   const [nextPin, setNextPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [message, setMessage] = useState("");
@@ -853,6 +870,13 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
       <p>L’assistant crée le bucket, configure CORS et active son adresse r2.dev.</p>
       <div className="settings-grid"><label><span>Account ID</span><input value={cloudflare.accountId} onChange={(event) => setCloudflare((old) => ({ ...old, accountId: event.target.value }))}/></label><label><span>Access Key ID parent</span><input value={cloudflare.parentAccessKeyId} onChange={(event) => setCloudflare((old) => ({ ...old, parentAccessKeyId: event.target.value }))}/></label><label className="wide"><span>Jeton API R2</span><input type="password" autoComplete="off" value={cloudflare.apiToken} onChange={(event) => setCloudflare((old) => ({ ...old, apiToken: event.target.value }))}/></label><label className="wide"><span>Nom du bucket</span><input value={cloudflare.bucket} onChange={(event) => setCloudflare((old) => ({ ...old, bucket: event.target.value.toLowerCase() }))}/></label></div>
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSetupR2(cloudflare), "Cloudflare R2 est prêt.")}>{status?.settings?.r2Ready ? "Tester et reconfigurer" : "Créer et connecter R2"}</button>
+    </section>
+    <section className="settings-card">
+      <div className="settings-card-heading"><div><span>Cloudflare</span><h3>Domaine public R2</h3></div></div>
+      <p>Connecte le bucket à ton domaine. Après la première demande, ajoute l’entrée DNS indiquée par Cloudflare puis relance cette action pour l’activer.</p>
+      <div className="settings-grid"><label className="wide"><span>Domaine</span><input inputMode="url" value={customDomain} onChange={(event) => setCustomDomain(event.target.value.trim().toLowerCase())}/></label><label className="wide"><span>Zone ID Cloudflare</span><input value={zoneId} onChange={(event) => setZoneId(event.target.value.trim())} placeholder="Zone de kabomane.me"/></label></div>
+      <button className="settings-primary" type="button" disabled={busy || !status?.settings?.r2Ready || !customDomain || !zoneId} onClick={() => run(async () => { const result = await onSetupR2CustomDomain(customDomain, zoneId); if (!result.active) throw new Error("Domaine enregistré : ajoute l’entrée DNS demandée par Cloudflare, attends le certificat TLS, puis relance ce bouton."); }, "Le domaine public R2 est actif.")}>Connecter {customDomain}</button>
+      {status?.settings?.r2PublicUrl && <small>URL active : {status.settings.r2PublicUrl}</small>}
     </section>
     <section className="settings-card">
       <div className="settings-card-heading"><div><span>Sécurité</span><h3>Changer le PIN</h3></div></div>
@@ -960,13 +984,19 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
     })().finally(() => { autoMigrationLock.current = false; });
   }, [storageStatus]);
   const update = (key, value) => setForm((old) => ({ ...old, [key]: value }));
-  const chooseFile = (kind, file) => {
+  const chooseFile = async (kind, file) => {
     setError("");
     if (kind === "image") {
       if (form.imagePreview) URL.revokeObjectURL(form.imagePreview);
       setForm((old) => ({ ...old, imageFile: file, imagePreview: file ? URL.createObjectURL(file) : "" }));
     } else {
-      update("audioFile", file);
+      try {
+        await validateAudioFile(file);
+        update("audioFile", file);
+      } catch (audioError) {
+        update("audioFile", null);
+        setError(audioError.message || "Ce fichier audio ne peut pas être publié.");
+      }
     }
   };
   const submit = async (event) => {
@@ -1146,7 +1176,7 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
           <div className="field-grid">
             <label className="wide"><span>Lien YouTube</span><input type="text" inputMode="url" value={form.youtube} onChange={(e) => update("youtube", e.target.value)} placeholder="https://youtube.com/watch?v=…"/></label>
             <FileField label="Image ou visuel généré par défaut" accept="image/*" file={form.imageFile} existing={form.image} onChange={(file) => chooseFile("image", file)} onRemove={() => setForm((old) => ({ ...old, image: "", imagePath: "", imageFile: null, imagePreview: "" }))}/>
-            <FileField label="Fichier audio (MP3 ou M4A)" accept="audio/mpeg,audio/mp4,audio/x-m4a,.mp3,.m4a" file={form.audioFile} existing={form.audio} onChange={(file) => chooseFile("audio", file)} onRemove={() => setForm((old) => ({ ...old, audio: "", audioPath: "", audioFile: null }))}/>
+            <FileField label="Fichier audio (MP3, AAC ou M4A)" accept="audio/mpeg,audio/aac,audio/x-aac,audio/mp4,audio/x-m4a,.mp3,.aac,.m4a" file={form.audioFile} existing={form.audio} onChange={(file) => chooseFile("audio", file)} onRemove={() => setForm((old) => ({ ...old, audio: "", audioPath: "", audioFile: null }))}/>
           </div>
         </section>
         <section className="editor-section">
@@ -1209,6 +1239,7 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
           busy={settingsBusy}
           onSave={async (nextSettings) => { setSettingsBusy(true); try { await onSaveStorageSettings(nextSettings, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onSetupR2={async (config) => { setSettingsBusy(true); try { await onSetupR2(config, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
+          onSetupR2CustomDomain={async (domain, zoneId) => { setSettingsBusy(true); try { return await onSetupR2CustomDomain(domain, zoneId, pin); } finally { await refreshStorage(); setSettingsBusy(false); } }}
           onToggleR2={async (enabled) => { setSettingsBusy(true); try { await onToggleR2(enabled, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onChangePin={async (nextPin) => { setSettingsBusy(true); try { await onChangePin(nextPin, pin); setPin(nextPin); } finally { setSettingsBusy(false); } }}
         />}
@@ -1464,7 +1495,7 @@ export default function App() {
       <div className="atmosphere" aria-hidden="true"/>
       {!adminMarkdownOpen && <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={openAdmin} aria-label="Espace créateur"><Icon name="lock" size={16}/> Créer</button></header>}
       <main>
-        {adminOpen ? <Admin episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onVerifyPin={verifyAdminPin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
+        {adminOpen ? <Admin episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onVerifyPin={verifyAdminPin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onSetupR2CustomDomain={setupR2CustomDomain} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
           : readerView()}
       </main>
       {!adminOpen && <footer><div className="footer-brand"><Icon name="lock" size={14}/> TBA Reader</div><span>© 2026 — Bizave Corp.</span></footer>}

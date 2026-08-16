@@ -772,7 +772,8 @@ footer { position: relative; z-index: 2; width: min(calc(100% - 36px),var(--max)
 .storage-episode span { color: var(--muted); font-size: 10px; }
 .storage-episode small { color: #df8778; font-size: 9px; }
 .storage-episode button { grid-column: 2; min-height: 37px; border: 1px solid var(--line-strong); border-radius: 10px; background: transparent; color: var(--text); font-size: 10px; font-weight: 700; cursor: pointer; }
-.storage-episode button:disabled { opacity: .48; cursor: wait; }
+.storage-episode button:disabled { opacity: .48; cursor: not-allowed; }
+.storage-episode button.is-busy:disabled { cursor: wait; }
 
 .settings-card { padding: 20px; display: grid; gap: 17px; border: 1px solid var(--line); border-radius: 19px; background: var(--surface); }
 .settings-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
