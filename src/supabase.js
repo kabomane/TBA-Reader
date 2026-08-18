@@ -296,9 +296,11 @@ function safeFilename(filename) {
   return filename.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(-140);
 }
 
-function adminSessionStartedAt() {
-  const value = Number(localStorage.getItem(ADMIN_SESSION_STARTED_KEY));
-  return Number.isFinite(value) ? value : 0;
+function adminSessionStartedAt(session) {
+  const localValue = Number(localStorage.getItem(ADMIN_SESSION_STARTED_KEY));
+  if (Number.isFinite(localValue) && localValue > 0) return localValue;
+  const signedInAt = Date.parse(session?.user?.last_sign_in_at ?? "");
+  return Number.isFinite(signedInAt) ? signedInAt : 0;
 }
 
 function validAdminUser(user) {
@@ -307,11 +309,14 @@ function validAdminUser(user) {
 
 export async function getAdminSession() {
   const { data: { session } } = await getClient().auth.getSession();
-  const startedAt = adminSessionStartedAt();
+  const startedAt = adminSessionStartedAt(session);
   if (!session || !validAdminUser(session.user) || !startedAt || Date.now() - startedAt >= ADMIN_SESSION_MAX_AGE_MS) {
     if (session) await getClient().auth.signOut({ scope: "local" }).catch(() => {});
     localStorage.removeItem(ADMIN_SESSION_STARTED_KEY);
     return null;
+  }
+  if (!localStorage.getItem(ADMIN_SESSION_STARTED_KEY)) {
+    localStorage.setItem(ADMIN_SESSION_STARTED_KEY, String(startedAt));
   }
   return session;
 }
@@ -336,7 +341,6 @@ async function bootstrapAdmin(pin) {
 }
 
 export async function signInAdmin(pin) {
-  localStorage.setItem(ADMIN_SESSION_STARTED_KEY, String(Date.now()));
   try {
     let result = await getClient().auth.signInWithPassword({ email: ADMIN_USER_KEY, password: pin });
     if (result.error) {
@@ -348,6 +352,8 @@ export async function signInAdmin(pin) {
       await getClient().auth.signOut({ scope: "local" });
       throw new Error("Ce compte n’est pas autorisé à administrer TBA Reader.");
     }
+    const startedAt = Date.parse(result.data.user.last_sign_in_at ?? "");
+    localStorage.setItem(ADMIN_SESSION_STARTED_KEY, String(Number.isFinite(startedAt) ? startedAt : Date.now()));
     return result.data.session;
   } catch (error) {
     localStorage.removeItem(ADMIN_SESSION_STARTED_KEY);
