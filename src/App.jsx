@@ -14,6 +14,7 @@ import { validateAudioFile } from "./media.js";
 import {
   EPISODE_REFRESH_INTERVAL_MS,
   changeAdminPin,
+  getAdminSession,
   getStorageStatus,
   loadEpisodeDetails as loadSupabaseEpisodeDetails,
   migrateEpisodeStorage,
@@ -21,10 +22,12 @@ import {
   renumberEpisodes as renumberSupabaseEpisodes,
   saveEpisode as saveSupabaseEpisode,
   saveStorageSettings,
+  signInAdmin,
+  signOutAdmin,
   setupR2,
   setupR2CustomDomain,
   toggleR2,
-  verifyAdminPin,
+  watchAdminSession,
   watchEpisodes,
 } from "./supabase.js";
 
@@ -881,13 +884,12 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onSetupR2CustomDomain,
     <section className="settings-card">
       <div className="settings-card-heading"><div><span>Sécurité</span><h3>Changer le PIN</h3></div></div>
       <div className="settings-grid"><label><span>Nouveau PIN</span><input type="password" inputMode="numeric" maxLength="6" value={nextPin} onChange={(event) => setNextPin(event.target.value.replace(/\D/g, "").slice(0, 6))}/></label><label><span>Confirmation</span><input type="password" inputMode="numeric" maxLength="6" value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, "").slice(0, 6))}/></label></div>
-      <button className="settings-primary" type="button" disabled={busy || nextPin.length !== 6 || nextPin !== confirmPin} onClick={() => run(async () => { await onChangePin(nextPin); setNextPin(""); setConfirmPin(""); }, "PIN modifié. Il sera demandé à la prochaine ouverture.")}>Modifier le PIN</button>
+      <button className="settings-primary" type="button" disabled={busy || nextPin.length !== 6 || nextPin !== confirmPin} onClick={() => run(async () => { await onChangePin(nextPin); setNextPin(""); setConfirmPin(""); }, "PIN modifié. Il sera demandé à la prochaine connexion.")}>Modifier le PIN</button>
     </section>
   </section>;
 }
 
-function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onRenumber, onVerifyPin, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
-  const [unlocked, setUnlocked] = useState(false);
+function Admin({ authReady, authenticated, episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onRenumber, onSignIn, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onSetupR2CustomDomain, onToggleR2, onChangePin, onMigrate, onClose }) {
   const [pin, setPin] = useState("");
   const [checkingPin, setCheckingPin] = useState(false);
   const [error, setError] = useState("");
@@ -909,16 +911,16 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
   const autoMigrationLock = useRef(false);
   const savingLock = useRef(false);
   const pendingIdentity = useRef(null);
+  const originalBody = useRef("");
   const initial = { title: "", description: "", body: "", type: "Texte", date: new Date().toISOString().slice(0, 10), duration: "", tags: "", youtube: "", image: "", imagePath: "", imageFile: null, imagePreview: "", audio: "", audioPath: "", audioFile: null, token: "", accessKey: "", tokenAction: "keep" };
   const [form, setForm] = useState(initial);
   useEffect(() => {
-    if (unlocked || pin.length !== 6) return undefined;
+    if (authenticated || pin.length !== 6) return undefined;
     let active = true;
     setCheckingPin(true);
-    onVerifyPin(pin)
+    onSignIn(pin)
       .then(() => {
         if (!active) return;
-        setUnlocked(true);
         setError("");
       })
       .catch((verifyError) => {
@@ -930,12 +932,15 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
         if (active) setCheckingPin(false);
       });
     return () => { active = false; };
-  }, [pin, unlocked, onVerifyPin]);
+  }, [authenticated, pin, onSignIn]);
+  useEffect(() => {
+    if (authenticated) setPin("");
+  }, [authenticated]);
   const refreshStorage = async () => {
-    if (!unlocked) return null;
+    if (!authenticated) return null;
     try {
       setStorageLoading(true);
-      const nextStatus = await onGetStorageStatus(pin);
+      const nextStatus = await onGetStorageStatus();
       setStorageStatus(nextStatus);
       return nextStatus;
     } catch (storageError) {
@@ -946,15 +951,15 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
     }
   };
   useEffect(() => {
-    if (!unlocked) return;
+    if (!authenticated) return;
     refreshStorage();
-  }, [unlocked]);
+  }, [authenticated]);
   const migrate = async (episode, target, automatic = false) => {
     if (migrating) return;
     try {
       setError("");
       setMigrating({ episodeId: episode.uid, current: 0, total: 0, label: "Préparation" });
-      await onMigrate(episode, target, pin, (progress) => setMigrating({ episodeId: episode.uid, ...progress }));
+      await onMigrate(episode, target, (progress) => setMigrating({ episodeId: episode.uid, ...progress }));
       setNotice(`${episode.title || "Épisode"} déplacé vers ${target === "r2" ? "Cloudflare R2" : "Supabase"}.`);
       await refreshStorage();
     } catch (migrationError) {
@@ -1031,12 +1036,13 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
         storageProvider: previous?.storageProvider || "supabase",
         storageBytes: previous?.storageBytes || 0,
         storageData: previous?.storageData || null,
-      }, { imageFile, audioFile }, pin);
+      }, { imageFile, audioFile, bodyChanged: !previous || form.body !== originalBody.current });
       if (imagePreview) URL.revokeObjectURL(imagePreview);
       setNotice(previous ? "Modifications enregistrées." : "Épisode publié.");
       setEditingId("");
       setMarkdownOpen(false);
       pendingIdentity.current = null;
+      originalBody.current = "";
       setForm(initial);
       setError("");
       setTab("manage");
@@ -1048,13 +1054,14 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
       setSaving(false);
     }
   };
-  const startCreate = () => { setEditingId(""); setMarkdownOpen(false); pendingIdentity.current = null; setForm(initial); setError(""); setNotice(""); setTab("create"); };
+  const startCreate = () => { setEditingId(""); setMarkdownOpen(false); pendingIdentity.current = null; originalBody.current = ""; setForm(initial); setError(""); setNotice(""); setTab("create"); };
   const startEdit = async (episode) => {
     if (loadingEditId) return;
     try {
       setLoadingEditId(episode.id);
       setError("");
       const detailedEpisode = await onLoadEpisode(episode);
+      originalBody.current = detailedEpisode.body;
       setEditingId(detailedEpisode.id);
       setMarkdownOpen(false);
       setForm({ title: detailedEpisode.title, description: detailedEpisode.description, body: detailedEpisode.body, type: detailedEpisode.type, date: detailedEpisode.date, duration: detailedEpisode.duration, tags: detailedEpisode.tags.join(", "), youtube: detailedEpisode.youtube || "", image: detailedEpisode.image || "", imagePath: detailedEpisode.imagePath || "", imageFile: null, imagePreview: "", audio: detailedEpisode.audio || "", audioPath: detailedEpisode.audioPath || "", audioFile: null, token: detailedEpisode.token || "", accessKey: "", tokenAction: "keep" });
@@ -1076,7 +1083,7 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
     try {
       setRenumbering(true);
       setError("");
-      await onRenumber(pin);
+      await onRenumber();
       setNotice(`${episodes.length} épisode${episodes.length > 1 ? "s" : ""} renuméroté${episodes.length > 1 ? "s" : ""}.`);
       setRenumberOpen(false);
     } catch (renumberError) {
@@ -1090,7 +1097,7 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
     try {
       setDeleting(true);
       setError("");
-      await onDelete(episode, pin);
+      await onDelete(episode);
       setNotice("Épisode et médias supprimés.");
       setDeleteTargetId("");
       await refreshStorage();
@@ -1101,7 +1108,8 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
     }
   };
   const contentMode = tab === "create" || tab === "manage";
-  if (!unlocked) return (
+  if (!authReady) return <div className="markdown-editor-loading" aria-label="Vérification de la session" aria-busy="true"><span className="button-spinner"/></div>;
+  if (!authenticated) return (
     <section className="pin-page">
       <button type="button" className="back" onClick={onClose}><Icon name="back"/> Retour au site</button>
       <div className="pin-panel">
@@ -1237,11 +1245,11 @@ function Admin({ episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete,
         : <SettingsPanel
           status={storageStatus}
           busy={settingsBusy}
-          onSave={async (nextSettings) => { setSettingsBusy(true); try { await onSaveStorageSettings(nextSettings, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
-          onSetupR2={async (config) => { setSettingsBusy(true); try { await onSetupR2(config, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
-          onSetupR2CustomDomain={async (domain, zoneId) => { setSettingsBusy(true); try { return await onSetupR2CustomDomain(domain, zoneId, pin); } finally { await refreshStorage(); setSettingsBusy(false); } }}
-          onToggleR2={async (enabled) => { setSettingsBusy(true); try { await onToggleR2(enabled, pin); await refreshStorage(); } finally { setSettingsBusy(false); } }}
-          onChangePin={async (nextPin) => { setSettingsBusy(true); try { await onChangePin(nextPin, pin); setPin(nextPin); } finally { setSettingsBusy(false); } }}
+          onSave={async (nextSettings) => { setSettingsBusy(true); try { await onSaveStorageSettings(nextSettings); await refreshStorage(); } finally { setSettingsBusy(false); } }}
+          onSetupR2={async (config) => { setSettingsBusy(true); try { await onSetupR2(config); await refreshStorage(); } finally { setSettingsBusy(false); } }}
+          onSetupR2CustomDomain={async (domain, zoneId) => { setSettingsBusy(true); try { return await onSetupR2CustomDomain(domain, zoneId); } finally { await refreshStorage(); setSettingsBusy(false); } }}
+          onToggleR2={async (enabled) => { setSettingsBusy(true); try { await onToggleR2(enabled); await refreshStorage(); } finally { setSettingsBusy(false); } }}
+          onChangePin={async (nextPin) => { setSettingsBusy(true); try { await onChangePin(nextPin); } finally { setSettingsBusy(false); } }}
         />}
     </div>
   );
@@ -1265,6 +1273,8 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(initialRoute.current.episodeId);
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminMarkdownOpen, setAdminMarkdownOpen] = useState(false);
+  const [adminSession, setAdminSession] = useState(null);
+  const [adminAuthReady, setAdminAuthReady] = useState(false);
   const [archiveTag, setArchiveTag] = useState(initialRoute.current.tag);
   const [bookmarks, setBookmarks] = useState(() => {
     try {
@@ -1285,6 +1295,19 @@ export default function App() {
   const selected = selectedSummary ? episodeDetails[selectedId] || selectedSummary : null;
   const allTags = useMemo(() => [...new Set(sorted.flatMap((episode) => episode.tags))].sort(), [sorted]);
   const bookmarkedEpisodes = useMemo(() => sorted.filter((episode) => bookmarks.has(episode.id)), [sorted, bookmarks]);
+  useEffect(() => {
+    let active = true;
+    getAdminSession()
+      .then((session) => { if (active) setAdminSession(session); })
+      .finally(() => { if (active) setAdminAuthReady(true); });
+    const unsubscribe = watchAdminSession((session) => {
+      if (active) {
+        setAdminSession(session);
+        setAdminAuthReady(true);
+      }
+    });
+    return () => { active = false; unsubscribe(); };
+  }, []);
   useEffect(() => {
     const cacheAge = Date.now() - showcaseCache.savedAt;
     const initialDelay = isShowcaseCacheFresh(showcaseCache)
@@ -1410,7 +1433,17 @@ export default function App() {
   const openAdmin = () => {
     setAdminMarkdownOpen(false);
     setAdminOpen(true);
-    refreshEpisodesRef.current?.();
+  };
+  const authenticateAdmin = async (pin) => {
+    const session = await signInAdmin(pin);
+    setAdminSession(session);
+    return session;
+  };
+  const logoutAdmin = async () => {
+    await signOutAdmin();
+    setAdminSession(null);
+    setAdminMarkdownOpen(false);
+    setAdminOpen(false);
   };
   const openTag = (tag) => goTo("archive", "", tag);
   const changeArchiveTag = (tag) => goTo("archive", "", tag);
@@ -1427,25 +1460,43 @@ export default function App() {
     setEpisodeDetails((current) => ({ ...current, [detailedEpisode.id]: detailedEpisode }));
     return detailedEpisode;
   };
-  const saveEpisode = async (episode, files, pin) => {
-    const savedEpisode = await saveSupabaseEpisode(episode, files, pin);
+  const updateEpisodeList = (updateList) => setEpisodes((current) => {
+    const next = updateList(current);
+    setShowcaseCache(writeShowcaseCache(filterEpisodesByAccess(next, accessTokenRef.current), accessTokenRef.current));
+    return next;
+  });
+  const saveEpisode = async (episode, files) => {
+    const savedEpisode = await saveSupabaseEpisode(episode, files);
+    updateEpisodeList((current) => {
+      const exists = current.some((item) => item.uid === savedEpisode.uid);
+      return exists
+        ? current.map((item) => item.uid === savedEpisode.uid ? savedEpisode : item)
+        : [...current, savedEpisode];
+    });
     setEpisodeDetails((current) => ({ ...current, [savedEpisode.id]: savedEpisode }));
-    await refreshEpisodesRef.current?.();
     return savedEpisode;
   };
-  const deleteEpisode = async (episode, pin) => {
-    await removeSupabaseEpisode(episode, pin);
-    await refreshEpisodesRef.current?.();
+  const deleteEpisode = async (episode) => {
+    await removeSupabaseEpisode(episode);
+    updateEpisodeList((current) => current.filter((item) => item.uid !== episode.uid));
+    setEpisodeDetails((current) => {
+      const next = { ...current };
+      delete next[episode.id];
+      return next;
+    });
   };
-  const renumberEpisodes = async (pin) => {
-    const result = await renumberSupabaseEpisodes(pin);
+  const renumberEpisodes = async () => {
+    const result = await renumberSupabaseEpisodes();
     await refreshEpisodesRef.current?.();
     return result;
   };
-  const migrateStorage = async (episode, target, pin, onProgress) => {
-    const result = await migrateEpisodeStorage(episode, target, pin, onProgress);
-    await refreshEpisodesRef.current?.();
-    return result;
+  const migrateStorage = async (episode, target, onProgress) => {
+    const migratedEpisode = await migrateEpisodeStorage(episode, target, onProgress);
+    updateEpisodeList((current) => current.map((item) => item.uid === migratedEpisode.uid ? { ...item, ...migratedEpisode } : item));
+    setEpisodeDetails((current) => current[migratedEpisode.id]
+      ? { ...current, [migratedEpisode.id]: { ...current[migratedEpisode.id], ...migratedEpisode } }
+      : current);
+    return migratedEpisode;
   };
   const hasShowcaseData = sorted.length > 0;
   const showBlockingSupabaseError = Boolean(supabaseError) && !hasFreshData && !hasShowcaseData;
@@ -1493,9 +1544,9 @@ export default function App() {
   return (
     <div className="app">
       <div className="atmosphere" aria-hidden="true"/>
-      {!adminMarkdownOpen && <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={openAdmin} aria-label="Espace créateur"><Icon name="lock" size={16}/> Créer</button></header>}
+      {!adminMarkdownOpen && <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={adminOpen && adminSession ? logoutAdmin : openAdmin} aria-label={adminOpen && adminSession ? "Déconnexion" : "Espace créateur"}><Icon name="lock" size={16}/> {adminOpen && adminSession ? "Déconnexion" : "Créer"}</button></header>}
       <main>
-        {adminOpen ? <Admin episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onVerifyPin={verifyAdminPin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onSetupR2CustomDomain={setupR2CustomDomain} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
+        {adminOpen ? <Admin authReady={adminAuthReady} authenticated={Boolean(adminSession)} episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onSignIn={authenticateAdmin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onSetupR2CustomDomain={setupR2CustomDomain} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
           : readerView()}
       </main>
       {!adminOpen && <footer><div className="footer-brand"><Icon name="lock" size={14}/> TBA Reader</div><span>© 2026 — Bizave Corp.</span></footer>}

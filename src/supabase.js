@@ -8,9 +8,14 @@ const EPISODE_REQUEST_TIMEOUT = 8000;
 const EPISODE_RETRY_DELAY = 1200;
 const EPISODE_RECOVERY_DELAY = 15000;
 const EPISODE_BODY_CACHE_PREFIX = "tba-episode-body-v1:";
+const PUBLIC_STORAGE_CACHE_KEY = "tba-public-storage-v1";
+const PUBLIC_STORAGE_REFRESH_MS = 30 * 60 * 1000;
+const ADMIN_SESSION_STARTED_KEY = "tba-admin-session-started-v1";
+const ADMIN_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const ADMIN_USER_KEY = "tba-admin@bizave.local";
 // Un commentaire Markdown/HTML est stocké pour les épisodes sans texte, sans rien afficher au lecteur.
 const EMPTY_EPISODE_BODY = "<!-- {NOTHING} -->";
-export const EPISODE_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
+export const EPISODE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 const EPISODE_COLUMNS = [
   "id", "share_id", "number", "title", "type", "tags", "published_on", "duration",
@@ -18,8 +23,11 @@ const EPISODE_COLUMNS = [
   "storage_provider", "storage_bytes", "data",
 ].join(",");
 
-const client = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+const client = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+});
 let publicStorageConfig = { r2Ready: false, r2Enabled: false, r2PublicUrl: "" };
+let publicStorageSavedAt = 0;
 
 function getClient() {
   return client;
@@ -31,6 +39,7 @@ function encodeObjectKey(key) {
 
 function publicMediaUrl(provider, key) {
   if (!key) return "";
+  readPublicStorageCache();
   if (provider === "r2" && publicStorageConfig.r2PublicUrl) {
     return `${publicStorageConfig.r2PublicUrl}/${encodeObjectKey(key)}`;
   }
@@ -116,13 +125,44 @@ function toRow(episode, provider, data) {
   };
 }
 
+function readPublicStorageCache() {
+  if (publicStorageSavedAt) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(PUBLIC_STORAGE_CACHE_KEY));
+    if (!saved || saved.version !== 1 || !Number.isFinite(saved.savedAt) || !saved.config) return;
+    publicStorageSavedAt = saved.savedAt;
+    publicStorageConfig = { ...publicStorageConfig, ...saved.config };
+  } catch {
+    // Cache facultatif.
+  }
+}
+
+function storePublicStorageConfig(config) {
+  publicStorageConfig = { ...publicStorageConfig, ...config };
+  publicStorageSavedAt = Date.now();
+  try {
+    localStorage.setItem(PUBLIC_STORAGE_CACHE_KEY, JSON.stringify({
+      version: 1,
+      savedAt: publicStorageSavedAt,
+      config: publicStorageConfig,
+    }));
+  } catch {
+    // Cache facultatif.
+  }
+}
+
+async function refreshPublicStorageConfig(force = false) {
+  readPublicStorageCache();
+  if (!force && publicStorageSavedAt && Date.now() - publicStorageSavedAt < PUBLIC_STORAGE_REFRESH_MS) return;
+  const { data, error } = await getClient().rpc("tba_public_storage_config");
+  if (!error && data) storePublicStorageConfig(data);
+}
+
 async function fetchEpisodes() {
-  const [episodesResult, configResult] = await Promise.all([
-    getClient().from("episodes").select(EPISODE_COLUMNS).order("created_at", { ascending: false }),
-    getClient().rpc("tba_public_storage_config"),
-  ]);
+  const configRequest = refreshPublicStorageConfig();
+  const episodesResult = await getClient().from("episodes").select(EPISODE_COLUMNS).order("created_at", { ascending: false });
+  await configRequest;
   if (episodesResult.error) throw episodesResult.error;
-  if (!configResult.error && configResult.data) publicStorageConfig = configResult.data;
   return episodesResult.data.map(fromRow);
 }
 
@@ -256,10 +296,81 @@ function safeFilename(filename) {
   return filename.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9._-]+/g, "-").slice(-140);
 }
 
-async function adminRequest(pin, payload) {
+function adminSessionStartedAt() {
+  const value = Number(localStorage.getItem(ADMIN_SESSION_STARTED_KEY));
+  return Number.isFinite(value) ? value : 0;
+}
+
+function validAdminUser(user) {
+  return user?.email === ADMIN_USER_KEY && user?.app_metadata?.role === "tba_admin";
+}
+
+export async function getAdminSession() {
+  const { data: { session } } = await getClient().auth.getSession();
+  const startedAt = adminSessionStartedAt();
+  if (!session || !validAdminUser(session.user) || !startedAt || Date.now() - startedAt >= ADMIN_SESSION_MAX_AGE_MS) {
+    if (session) await getClient().auth.signOut({ scope: "local" }).catch(() => {});
+    localStorage.removeItem(ADMIN_SESSION_STARTED_KEY);
+    return null;
+  }
+  return session;
+}
+
+export function watchAdminSession(onChange) {
+  const { data: { subscription } } = getClient().auth.onAuthStateChange(() => {
+    window.setTimeout(() => {
+      getAdminSession().then(onChange).catch(() => onChange(null));
+    }, 0);
+  });
+  return () => subscription.unsubscribe();
+}
+
+async function bootstrapAdmin(pin) {
   const response = await fetch(`${SUPABASE_URL}/functions/v1/tba-admin`, {
     method: "POST",
     headers: { apikey: SUPABASE_PUBLISHABLE_KEY, "Content-Type": "application/json", "x-tba-pin": pin },
+    body: JSON.stringify({ action: "bootstrap-admin" }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Initialisation du compte créateur refusée.");
+}
+
+export async function signInAdmin(pin) {
+  localStorage.setItem(ADMIN_SESSION_STARTED_KEY, String(Date.now()));
+  try {
+    let result = await getClient().auth.signInWithPassword({ email: ADMIN_USER_KEY, password: pin });
+    if (result.error) {
+      await bootstrapAdmin(pin);
+      result = await getClient().auth.signInWithPassword({ email: ADMIN_USER_KEY, password: pin });
+    }
+    if (result.error) throw result.error;
+    if (!validAdminUser(result.data.user)) {
+      await getClient().auth.signOut({ scope: "local" });
+      throw new Error("Ce compte n’est pas autorisé à administrer TBA Reader.");
+    }
+    return result.data.session;
+  } catch (error) {
+    localStorage.removeItem(ADMIN_SESSION_STARTED_KEY);
+    throw error;
+  }
+}
+
+export async function signOutAdmin() {
+  localStorage.removeItem(ADMIN_SESSION_STARTED_KEY);
+  const { error } = await getClient().auth.signOut({ scope: "local" });
+  if (error) throw error;
+}
+
+async function adminRequest(payload) {
+  const session = await getAdminSession();
+  if (!session) throw new Error("Session créateur expirée. Reconnecte-toi.");
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/tba-admin`, {
+    method: "POST",
+    headers: {
+      apikey: SUPABASE_PUBLISHABLE_KEY,
+      Authorization: `Bearer ${session.access_token}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(payload),
   });
   const data = await response.json().catch(() => ({}));
@@ -267,18 +378,16 @@ async function adminRequest(pin, payload) {
   return data;
 }
 
-export async function verifyAdminPin(pin) {
-  await adminRequest(pin, { action: "verify" });
-}
-
-async function uploadSupabaseFile(episodeId, kind, file, pin) {
-  const signed = await adminRequest(pin, { action: "sign-upload", episodeId, kind, filename: safeFilename(file.name) });
-  const { error } = await getClient().storage.from(MEDIA_BUCKET).uploadToSignedUrl(signed.path, signed.token, file, {
+async function uploadSupabaseFile(episodeId, kind, file, uploadedKeys) {
+  const path = mediaKey(episodeId, kind, file.name);
+  const { error } = await getClient().storage.from(MEDIA_BUCKET).upload(path, file, {
     cacheControl: "3600",
     contentType: fileMime(file),
+    upsert: false,
   });
   if (error) throw error;
-  return { key: signed.path, size: file.size, mime: fileMime(file), etag: null };
+  uploadedKeys.push(path);
+  return { key: path, size: file.size, mime: fileMime(file), etag: null };
 }
 
 function mediaKey(episodeId, kind, filename) {
@@ -293,15 +402,14 @@ async function fetchBlob(url, label) {
   return response.blob();
 }
 
-async function uploadR2Items(episodeId, items, pin) {
+async function uploadR2Items(episodeId, items, uploadedKeys = null) {
   if (!items.length) return [];
-  const signing = await adminRequest(pin, {
+  const signing = await adminRequest({
     action: "r2-upload-urls",
     episodeId,
     objects: items.map((item) => item.key),
   });
-  const uploaded = [];
-  for (const item of items) {
+  const outcomes = await Promise.allSettled(items.map(async (item) => {
     const target = signing.objects?.find((object) => object.key === item.key);
     if (!target?.url) throw new Error(`URL R2 absente pour ${item.key}.`);
     const response = await fetch(target.url, {
@@ -310,23 +418,27 @@ async function uploadR2Items(episodeId, items, pin) {
       body: item.blob,
     });
     if (!response.ok) throw new Error(`Envoi R2 refusé pour ${item.key} (${response.status}).`);
-    uploaded.push({
+    if (uploadedKeys) uploadedKeys.push(item.key);
+    return {
       key: item.key,
       size: item.blob.size,
       mime: item.blob.type || item.mime || "application/octet-stream",
       etag: response.headers.get("etag"),
-    });
-  }
-  return uploaded;
+    };
+  }));
+  const failed = outcomes.find((outcome) => outcome.status === "rejected");
+  if (failed) throw failed.reason;
+  return outcomes.map((outcome) => outcome.value);
 }
 
-async function buildR2Data(episode, files, pin) {
+async function buildR2Data(episode, files, uploadedKeys) {
   const switching = episode.storageProvider !== "r2";
-  const bodyBlob = new Blob([storageBody(episode.body)], { type: "text/markdown;charset=utf-8" });
-  const uploads = [{ key: episodeBodyPath(episode.uid), blob: bodyBlob, kind: "body" }];
+  const uploads = [];
   const next = { youtube: episode.youtube || null, body: null, image: null, audio: null };
 
-  for (const kind of ["image", "audio"]) {
+  // L'audio est le média le plus susceptible d'être refusé : l'envoyer avant
+  // l'image évite de créer une miniature orpheline si cet envoi échoue.
+  for (const kind of ["audio", "image"]) {
     const file = files[`${kind}File`];
     const existingItem = episode.storageData?.[kind] ?? null;
     const existingUrl = episode[kind] || "";
@@ -338,41 +450,65 @@ async function buildR2Data(episode, files, pin) {
       next[kind] = existingItem;
     }
   }
+  if (switching || files.bodyChanged !== false || !episode.storageData?.body) {
+    uploads.push({
+      key: episodeBodyPath(episode.uid),
+      blob: new Blob([storageBody(episode.body)], { type: "text/markdown;charset=utf-8" }),
+      kind: "body",
+    });
+  } else {
+    next.body = episode.storageData.body;
+  }
 
-  const uploaded = await uploadR2Items(episode.uid, uploads, pin);
+  const uploaded = await uploadR2Items(episode.uid, uploads, uploadedKeys);
   for (let index = 0; index < uploads.length; index += 1) next[uploads[index].kind] = uploaded[index];
   return next;
 }
 
-export async function saveEpisode(episode, files = {}, pin) {
+export async function saveEpisode(episode, files = {}) {
   const requiresR2 = [files.imageFile, files.audioFile].filter(Boolean).some((file) => file.size > MAX_SUPABASE_FILE_BYTES);
   const provider = episode.storageProvider === "r2" || requiresR2 ? "r2" : "supabase";
+  const uploadedKeys = [];
   let data;
 
-  if (provider === "r2") {
-    data = await buildR2Data(episode, files, pin);
-  } else {
-    const previous = episode.storageData ?? {};
-    const image = files.imageFile
-      ? await uploadSupabaseFile(episode.uid, "image", files.imageFile, pin)
-      : episode.imagePath ? previous.image ?? legacyItem(episode.imagePath, "image/*") : null;
-    const audio = files.audioFile
-      ? await uploadSupabaseFile(episode.uid, "audio", files.audioFile, pin)
-      : episode.audioPath ? previous.audio ?? legacyItem(episode.audioPath, "audio/*") : null;
-    data = {
-      youtube: episode.youtube || null,
-      body: { key: episodeBodyPath(episode.uid), size: new TextEncoder().encode(episode.body).byteLength, mime: "text/markdown;charset=utf-8" },
-      image,
-      audio,
-    };
-  }
+  let result;
+  try {
+    if (provider === "r2") {
+      data = await buildR2Data(episode, files, uploadedKeys);
+    } else {
+      const previous = episode.storageData ?? {};
+      const audio = files.audioFile
+        ? await uploadSupabaseFile(episode.uid, "audio", files.audioFile, uploadedKeys)
+        : episode.audioPath ? previous.audio ?? legacyItem(episode.audioPath, "audio/*") : null;
+      const image = files.imageFile
+        ? await uploadSupabaseFile(episode.uid, "image", files.imageFile, uploadedKeys)
+        : episode.imagePath ? previous.image ?? legacyItem(episode.imagePath, "image/*") : null;
+      data = {
+        youtube: episode.youtube || null,
+        body: { key: episodeBodyPath(episode.uid), size: new TextEncoder().encode(episode.body).byteLength, mime: "text/markdown;charset=utf-8" },
+        image,
+        audio,
+      };
+    }
 
-  const body = storageBody(episode.body);
-  const result = await adminRequest(pin, {
-    action: "save",
-    episode: toRow(episode, provider, data),
-    body: provider === "supabase" ? body : undefined,
-  });
+    const body = storageBody(episode.body);
+    result = await adminRequest({
+      action: "save",
+      episode: toRow(episode, provider, data),
+      body: provider === "supabase" ? body : undefined,
+      bodyChanged: files.bodyChanged !== false,
+    });
+  } catch (error) {
+    if (uploadedKeys.length) {
+      await adminRequest({
+        action: "cleanup-upload",
+        episodeId: episode.uid,
+        provider,
+        objects: uploadedKeys,
+      }).catch(() => {});
+    }
+    throw error;
+  }
   writeEpisodeBodyCache(episode.uid, episode.body);
   return {
     ...episode,
@@ -387,55 +523,55 @@ export async function saveEpisode(episode, files = {}, pin) {
   };
 }
 
-export async function removeEpisode(episode, pin) {
-  await adminRequest(pin, { action: "delete", id: episode.uid });
+export async function removeEpisode(episode) {
+  await adminRequest({ action: "delete", id: episode.uid });
   removeEpisodeBodyCache(episode.uid);
 }
 
-export async function renumberEpisodes(pin) {
-  return adminRequest(pin, { action: "renumber" });
+export async function renumberEpisodes() {
+  return adminRequest({ action: "renumber" });
 }
 
-export async function getStorageStatus(pin) {
-  const status = await adminRequest(pin, { action: "storage-status" });
-  if (status.settings?.r2PublicUrl) publicStorageConfig = {
+export async function getStorageStatus() {
+  const status = await adminRequest({ action: "storage-status" });
+  if (status.settings?.r2PublicUrl) storePublicStorageConfig({
     r2Ready: status.settings.r2Ready,
     r2Enabled: status.settings.r2Enabled,
     r2PublicUrl: status.settings.r2PublicUrl,
-  };
+  });
   return status;
 }
 
-export async function saveStorageSettings(settings, pin) {
-  return adminRequest(pin, { action: "settings-save", ...settings });
+export async function saveStorageSettings(settings) {
+  return adminRequest({ action: "settings-save", ...settings });
 }
 
-export async function setupR2(config, pin) {
-  const result = await adminRequest(pin, { action: "r2-setup", ...config });
-  publicStorageConfig = { ...publicStorageConfig, r2Ready: true, r2PublicUrl: result.publicUrl };
+export async function setupR2(config) {
+  const result = await adminRequest({ action: "r2-setup", ...config });
+  storePublicStorageConfig({ r2Ready: true, r2PublicUrl: result.publicUrl });
   return result;
 }
 
-export async function setupR2CustomDomain(domain, zoneId, pin) {
-  const result = await adminRequest(pin, { action: "r2-custom-domain", domain, zoneId });
+export async function setupR2CustomDomain(domain, zoneId) {
+  const result = await adminRequest({ action: "r2-custom-domain", domain, zoneId });
   if (result.active && result.publicUrl) {
-    publicStorageConfig = { ...publicStorageConfig, r2Ready: true, r2PublicUrl: result.publicUrl };
+    storePublicStorageConfig({ r2Ready: true, r2PublicUrl: result.publicUrl });
   }
   return result;
 }
 
-export async function toggleR2(enabled, pin) {
-  const result = await adminRequest(pin, { action: "r2-toggle", enabled });
-  publicStorageConfig = { ...publicStorageConfig, r2Enabled: result.enabled };
+export async function toggleR2(enabled) {
+  const result = await adminRequest({ action: "r2-toggle", enabled });
+  storePublicStorageConfig({ r2Enabled: result.enabled });
   return result;
 }
 
-export async function changeAdminPin(nextPin, pin) {
-  return adminRequest(pin, { action: "change-pin", nextPin });
+export async function changeAdminPin(nextPin) {
+  return adminRequest({ action: "change-pin", nextPin });
 }
 
-export async function migrateEpisodeStorage(episode, target, pin, onProgress = () => {}) {
-  const started = await adminRequest(pin, { action: "migration-start", episodeId: episode.uid, target });
+export async function migrateEpisodeStorage(episode, target, onProgress = () => {}) {
+  const started = await adminRequest({ action: "migration-start", episodeId: episode.uid, target });
   const items = [started.data.body, started.data.image, started.data.audio].filter(Boolean);
   try {
     onProgress({ current: 0, total: items.length, label: "Préparation" });
@@ -446,30 +582,34 @@ export async function migrateEpisodeStorage(episode, target, pin, onProgress = (
         onProgress({ current: index, total: items.length, label: item.key });
         transfers.push({ ...item, blob: await fetchBlob(publicMediaUrl("supabase", item.key), item.key) });
       }
-      await uploadR2Items(episode.uid, transfers, pin);
+      await uploadR2Items(episode.uid, transfers);
     } else {
-      const signed = await adminRequest(pin, {
-        action: "migration-supabase-sign",
-        episodeId: episode.uid,
-        objects: items.map((item) => item.key),
-      });
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index];
         onProgress({ current: index, total: items.length, label: item.key });
         const blob = await fetchBlob(publicMediaUrl("r2", item.key), item.key);
-        const targetObject = signed.objects.find((object) => object.key === item.key);
-        const { error } = await getClient().storage.from(MEDIA_BUCKET).uploadToSignedUrl(item.key, targetObject.token, blob, {
+        const { error } = await getClient().storage.from(MEDIA_BUCKET).upload(item.key, blob, {
           cacheControl: "3600",
           contentType: item.mime || blob.type,
+          upsert: true,
         });
         if (error) throw error;
       }
     }
     onProgress({ current: items.length, total: items.length, label: "Vérification" });
-    const result = await adminRequest(pin, { action: "migration-finish", jobId: started.job.id });
-    return result;
+    const result = await adminRequest({ action: "migration-finish", jobId: started.job.id });
+    return {
+      ...episode,
+      storageProvider: result.provider,
+      storageBytes: result.storageBytes,
+      storageData: result.data,
+      imagePath: result.data.image?.key ?? "",
+      audioPath: result.data.audio?.key ?? "",
+      image: publicMediaUrl(result.provider, result.data.image?.key),
+      audio: publicMediaUrl(result.provider, result.data.audio?.key),
+    };
   } catch (error) {
-    await adminRequest(pin, { action: "migration-error", jobId: started.job.id, error: error.message }).catch(() => {});
+    await adminRequest({ action: "migration-error", jobId: started.job.id, error: error.message }).catch(() => {});
     throw error;
   }
 }

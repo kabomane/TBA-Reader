@@ -117,11 +117,11 @@ select vault.create_secret(
 );
 ```
 
-Une fois l’administration accessible, le PIN peut être changé depuis **Infrastructure → Paramètres**. Le nouveau hash remplace alors le secret Vault existant.
+Ce hash sert uniquement au premier amorçage. Lors de la première connexion réussie, l’Edge Function crée le compte Supabase Auth administrateur avec ce même PIN et le rôle protégé `tba_admin`. Les connexions suivantes passent exclusivement par Supabase Auth. Le PIN peut ensuite être changé depuis **Infrastructure → Paramètres**.
 
 ## 5. Déployer l’Edge Function
 
-`tba-admin` possède sa propre authentification par PIN. Elle doit donc être déployée sans vérification JWT de la passerelle :
+`tba-admin` doit recevoir le premier appel d’amorçage sans JWT. Elle est donc déployée sans vérification JWT de la passerelle, puis vérifie elle-même le JWT et le rôle `tba_admin` pour toutes les autres actions :
 
 ```powershell
 npx supabase functions deploy tba-admin --project-ref <PROJECT_REF> --no-verify-jwt
@@ -129,7 +129,7 @@ npx supabase functions deploy tba-admin --project-ref <PROJECT_REF> --no-verify-
 
 Supabase fournit automatiquement `SUPABASE_URL` et `SUPABASE_SERVICE_ROLE_KEY` à la fonction hébergée. N’ajoutez jamais cette dernière au frontend.
 
-Test minimal après déploiement : ouvrir l’administration et vérifier qu’un mauvais PIN est refusé, puis que le bon PIN ouvre l’espace créateur.
+Test minimal après déploiement : ouvrir l’administration, vérifier qu’un mauvais PIN est refusé, puis que le bon PIN crée la session Auth. Rechargez la page pour confirmer la persistance et utilisez **Déconnexion** pour confirmer sa fermeture.
 
 ## 6. Configurer Cloudflare R2
 
@@ -198,7 +198,8 @@ Firebase doit afficher `Deploy complete!`. Vérifiez ensuite le domaine Firebase
 - aucune clé `service_role`, clé secrète R2 ou valeur de PIN n’est suivie par Git ;
 - toutes les migrations sont appliquées et RLS est actif ;
 - `tba-admin` est déployée avec `--no-verify-jwt` ;
-- le hash du PIN existe dans Vault sous `tba_admin_pin_hash` ;
+- le hash d’amorçage existe dans Vault sous `tba_admin_pin_hash` avant la première connexion ;
+- le compte Auth possède `app_metadata.role = tba_admin` après la première connexion ;
 - les domaines sont autorisés par l’Edge Function et par R2 ;
 - Firebase réécrit toutes les routes vers `index.html` ;
 - R2 et la migration automatique sont désactivés jusqu’à activation explicite ;

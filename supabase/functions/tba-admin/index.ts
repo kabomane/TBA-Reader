@@ -1,8 +1,9 @@
-import { createClient } from "npm:@supabase/supabase-js@2.110.7";
+import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2.110.7";
 import { AwsClient } from "npm:aws4fetch@1.0.20";
 
 const SUPABASE_BUCKET = "tba-media";
 const MAX_SUPABASE_FILE_BYTES = 50_000_000;
+const ADMIN_USER_KEY = "tba-admin@bizave.local";
 const technicalIdPattern = /^[a-zA-Z0-9-]{3,64}$/;
 const shareIdPattern = /^[a-z0-9]{8}$/;
 const accessTokenPattern = /^[0-9a-f]{16}$/;
@@ -10,10 +11,13 @@ const bucketPattern = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
 const cloudflareZoneIdPattern = /^[a-f0-9]{32}$/;
 const hostnamePattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
 const attempts = new Map<string, { count: number; blockedUntil: number }>();
+const settingsCache = new WeakMap<object, Promise<any>>();
+const secretsCache = new WeakMap<object, Map<string, Promise<string>>>();
 
 type Provider = "supabase" | "r2";
 type MediaItem = { key: string; size: number; mime: string; etag?: string | null };
 type MediaData = { youtube?: string | null; body: MediaItem; image?: MediaItem | null; audio?: MediaItem | null };
+type AdminClient = SupabaseClient<any>;
 
 function allowedOrigin(origin: string) {
   if (!origin) return "*";
@@ -141,28 +145,48 @@ function encodeObjectKey(key: string) {
   return key.split("/").map(encodeURIComponent).join("/");
 }
 
-async function settings(supabase: ReturnType<typeof createClient>) {
-  const { data, error } = await supabase.from("tba_settings").select("*").eq("id", true).single();
-  if (error) throw error;
-  return data;
+async function settings(supabase: AdminClient) {
+  let pending = settingsCache.get(supabase);
+  if (!pending) {
+    pending = (async () => {
+      const { data, error } = await supabase.from("tba_settings").select("*").eq("id", true).single();
+      if (error) throw error;
+      return data;
+    })();
+    settingsCache.set(supabase, pending);
+  }
+  return pending;
 }
 
-async function secret(supabase: ReturnType<typeof createClient>, name: string) {
-  const { data, error } = await supabase.rpc("tba_get_secret", { secret_name: name });
-  if (error) throw error;
-  return data ? String(data) : "";
+async function secret(supabase: AdminClient, name: string) {
+  let cache = secretsCache.get(supabase);
+  if (!cache) {
+    cache = new Map();
+    secretsCache.set(supabase, cache);
+  }
+  let pending = cache.get(name);
+  if (!pending) {
+    pending = (async () => {
+      const { data, error } = await supabase.rpc("tba_get_secret", { secret_name: name });
+      if (error) throw error;
+      return data ? String(data) : "";
+    })();
+    cache.set(name, pending);
+  }
+  return pending;
 }
 
-async function setSecret(supabase: ReturnType<typeof createClient>, name: string, value: string, description: string) {
+async function setSecret(supabase: AdminClient, name: string, value: string, description: string) {
   const { error } = await supabase.rpc("tba_upsert_secret", {
     secret_name: name,
     secret_value: value,
     secret_description: description,
   });
   if (error) throw error;
+  secretsCache.get(supabase)?.delete(name);
 }
 
-async function authenticate(req: Request, supabase: ReturnType<typeof createClient>) {
+async function authenticateLegacyPin(req: Request, supabase: AdminClient) {
   const ip = req.headers.get("cf-connecting-ip") ?? req.headers.get("x-forwarded-for") ?? "unknown";
   const state = attempts.get(ip);
   if (state?.blockedUntil && state.blockedUntil > Date.now()) {
@@ -179,6 +203,20 @@ async function authenticate(req: Request, supabase: ReturnType<typeof createClie
   const blockedUntil = count >= 5 ? Date.now() + Math.min(300_000, 15_000 * 2 ** (count - 5)) : 0;
   attempts.set(ip, { count, blockedUntil });
   return { ok: false, retryAfter: blockedUntil ? Math.ceil((blockedUntil - Date.now()) / 1000) : 0 };
+}
+
+async function authenticateAdmin(req: Request, supabase: AdminClient) {
+  const authorization = req.headers.get("authorization") ?? "";
+  const token = authorization.match(/^Bearer\s+(.+)$/i)?.[1] ?? "";
+  if (!token) return { ok: false, userId: "" };
+  const { data, error } = await supabase.auth.getClaims(token);
+  const claims = data?.claims as Record<string, unknown> | undefined;
+  const appMetadata = claims?.app_metadata as Record<string, unknown> | undefined;
+  const ok = !error
+    && claims?.email === ADMIN_USER_KEY
+    && appMetadata?.role === "tba_admin"
+    && typeof claims?.sub === "string";
+  return { ok, userId: ok ? String(claims?.sub) : "" };
 }
 
 async function cloudflareFetch(accountId: string, token: string, path: string, init: RequestInit = {}) {
@@ -198,7 +236,7 @@ async function cloudflareFetch(accountId: string, token: string, path: string, i
   return data.result;
 }
 
-async function r2Context(supabase: ReturnType<typeof createClient>) {
+async function r2Context(supabase: AdminClient) {
   const config = await settings(supabase);
   if (!config.r2_ready || !config.r2_account_id || !config.r2_bucket || !config.r2_public_url) {
     throw new Error("Cloudflare R2 doit être configuré.");
@@ -208,13 +246,13 @@ async function r2Context(supabase: ReturnType<typeof createClient>) {
   return { config, token };
 }
 
-async function r2WriteContext(supabase: ReturnType<typeof createClient>) {
+async function r2WriteContext(supabase: AdminClient) {
   const context = await r2Context(supabase);
   if (!context.config.r2_enabled) throw new Error("Cloudflare R2 est désactivé.");
   return context;
 }
 
-async function activateR2CustomDomain(supabase: ReturnType<typeof createClient>, domain: string, zoneId: string) {
+async function activateR2CustomDomain(supabase: AdminClient, domain: string, zoneId: string) {
   const { config, token } = await r2Context(supabase);
   const basePath = `/accounts/${config.r2_account_id}/r2/buckets/${encodeURIComponent(config.r2_bucket)}/domains/custom`;
   const listed = await cloudflareFetch(config.r2_account_id, token, basePath);
@@ -239,7 +277,7 @@ async function activateR2CustomDomain(supabase: ReturnType<typeof createClient>,
   return { active: true, publicUrl, status: detail.status };
 }
 
-async function r2UploadUrls(supabase: ReturnType<typeof createClient>, objects: string[]) {
+async function r2UploadUrls(supabase: AdminClient, objects: string[]) {
   const { config, token } = await r2WriteContext(supabase);
   const credentials = await cloudflareFetch(
     config.r2_account_id,
@@ -272,27 +310,27 @@ async function r2UploadUrls(supabase: ReturnType<typeof createClient>, objects: 
   };
 }
 
-async function verifyR2(supabase: ReturnType<typeof createClient>, items: MediaItem[]) {
+async function verifyR2(supabase: AdminClient, items: MediaItem[]) {
   const { config } = await r2Context(supabase);
-  for (const item of items) {
+  await Promise.all(items.map(async (item) => {
     const response = await fetch(`${config.r2_public_url}/${encodeObjectKey(item.key)}`, { method: "HEAD" });
     if (!response.ok) throw new Error(`Fichier R2 introuvable : ${item.key}`);
     const size = Number(response.headers.get("content-length") ?? item.size);
     if (item.size && size !== item.size) throw new Error(`Taille R2 incorrecte : ${item.key}`);
-  }
+  }));
 }
 
-async function supabaseObjectInfo(supabase: ReturnType<typeof createClient>, keys: string[]) {
+async function supabaseObjectInfo(supabase: AdminClient, keys: string[]) {
   const { data, error } = await supabase.rpc("tba_object_info", { object_keys: keys });
   if (error) throw error;
   return (Array.isArray(data) ? data : []) as MediaItem[];
 }
 
-async function verifySupabase(supabase: ReturnType<typeof createClient>, items: MediaItem[]) {
+async function verifySupabase(supabase: AdminClient, items: MediaItem[], knownItems?: MediaItem[]) {
   if (items.some((item) => item.size > MAX_SUPABASE_FILE_BYTES)) {
     throw new Error("Un fichier dépasse la limite Supabase de 50 Mo.");
   }
-  const actual = await supabaseObjectInfo(supabase, items.map((item) => item.key));
+  const actual = knownItems ?? await supabaseObjectInfo(supabase, items.map((item) => item.key));
   for (const item of items) {
     const found = actual.find((candidate) => candidate.key === item.key);
     if (!found) throw new Error(`Fichier Supabase introuvable : ${item.key}`);
@@ -300,7 +338,7 @@ async function verifySupabase(supabase: ReturnType<typeof createClient>, items: 
   }
 }
 
-async function deleteR2Objects(supabase: ReturnType<typeof createClient>, keys: string[]) {
+async function deleteR2Objects(supabase: AdminClient, keys: string[]) {
   if (!keys.length) return;
   const { config, token } = await r2Context(supabase);
   for (const key of keys) {
@@ -313,7 +351,7 @@ async function deleteR2Objects(supabase: ReturnType<typeof createClient>, keys: 
   }
 }
 
-async function deleteObjects(supabase: ReturnType<typeof createClient>, provider: Provider, keys: string[]) {
+async function deleteObjects(supabase: AdminClient, provider: Provider, keys: string[]) {
   if (!keys.length) return;
   if (provider === "supabase") {
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).remove(keys);
@@ -323,7 +361,7 @@ async function deleteObjects(supabase: ReturnType<typeof createClient>, provider
   }
 }
 
-async function storageStatus(supabase: ReturnType<typeof createClient>) {
+async function storageStatus(supabase: AdminClient) {
   const [config, usageResult, orphanResult, episodesResult, jobsResult] = await Promise.all([
     settings(supabase),
     supabase.rpc("tba_storage_bytes"),
@@ -370,17 +408,38 @@ Deno.serve(async (req) => {
   const supabase = createClient(supabaseUrl, serviceRoleKey);
 
   try {
-    const auth = await authenticate(req, supabase);
-    if (!auth.ok) {
-      return json(
-        req,
-        { error: auth.retryAfter ? `Trop de tentatives. Réessaie dans ${auth.retryAfter}s.` : "Code PIN incorrect." },
-        401,
-        auth.retryAfter ? { "Retry-After": String(auth.retryAfter) } : {},
-      );
+    const payload = await req.json();
+    if (payload.action === "bootstrap-admin") {
+      const legacyAuth = await authenticateLegacyPin(req, supabase);
+      if (!legacyAuth.ok) {
+        return json(
+          req,
+          { error: legacyAuth.retryAfter ? `Trop de tentatives. Réessaie dans ${legacyAuth.retryAfter}s.` : "Code PIN incorrect." },
+          401,
+          legacyAuth.retryAfter ? { "Retry-After": String(legacyAuth.retryAfter) } : {},
+        );
+      }
+      const { data: users, error: usersError } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
+      if (usersError) throw usersError;
+      const existing = users.users.find((user) => user.email === ADMIN_USER_KEY);
+      if (!existing) {
+        const pin = req.headers.get("x-tba-pin") ?? "";
+        const { error: createError } = await supabase.auth.admin.createUser({
+          email: ADMIN_USER_KEY,
+          password: pin,
+          email_confirm: true,
+          app_metadata: { role: "tba_admin" },
+        });
+        if (createError) throw createError;
+      }
+      return json(req, { ok: true, created: !existing });
     }
 
-    const payload = await req.json();
+    const auth = await authenticateAdmin(req, supabase);
+    if (!auth.ok) {
+      return json(req, { error: "Session créateur invalide ou expirée." }, 401);
+    }
+
     if (payload.action === "verify") return json(req, { ok: true });
 
     if (payload.action === "storage-status") return json(req, await storageStatus(supabase));
@@ -432,7 +491,8 @@ Deno.serve(async (req) => {
     if (payload.action === "change-pin") {
       const nextPin = String(payload.nextPin ?? "");
       if (!/^\d{6}$/.test(nextPin)) return json(req, { error: "Le nouveau PIN doit contenir 6 chiffres." }, 400);
-      await setSecret(supabase, "tba_admin_pin_hash", await sha256(nextPin), "SHA-256 du PIN administrateur TBA Reader");
+      const { error } = await supabase.auth.admin.updateUserById(auth.userId, { password: nextPin });
+      if (error) throw error;
       return json(req, { ok: true });
     }
 
@@ -499,37 +559,41 @@ Deno.serve(async (req) => {
 
     if (payload.action === "r2-upload-urls") {
       const episodeId = String(payload.episodeId ?? "");
-      const objects = Array.isArray(payload.objects) ? payload.objects.map(String) : [];
+      const objects: string[] = Array.isArray(payload.objects) ? payload.objects.map(String) : [];
       if (!technicalIdPattern.test(episodeId) || !objects.length || objects.some((key) => !validEpisodeKey(key, episodeId))) {
         return json(req, { error: "Chemins R2 invalides." }, 400);
       }
       return json(req, await r2UploadUrls(supabase, objects));
     }
 
-    if (payload.action === "sign-upload") {
+    if (payload.action === "cleanup-upload") {
       const episodeId = String(payload.episodeId ?? "");
-      const kind = ["image", "audio"].includes(payload.kind) ? String(payload.kind) : "";
-      const filename = safeFilename(String(payload.filename ?? "file"));
-      if (!technicalIdPattern.test(episodeId) || !kind || !filename) return json(req, { error: "Demande upload invalide." }, 400);
-      const path = `episodes/${episodeId}/${kind}-${Date.now()}-${filename}`;
-      const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).createSignedUploadUrl(path);
-      if (error) throw error;
-      return json(req, { path, token: data.token, publicUrl: supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(path).data.publicUrl });
-    }
-
-    if (payload.action === "migration-supabase-sign") {
-      const episodeId = String(payload.episodeId ?? "");
-      const objects = Array.isArray(payload.objects) ? payload.objects.map(String) : [];
-      if (!technicalIdPattern.test(episodeId) || !objects.length || objects.some((key) => !validEpisodeKey(key, episodeId))) {
-        return json(req, { error: "Chemins Supabase invalides." }, 400);
+      const provider: Provider = payload.provider === "r2" ? "r2" : "supabase";
+      const objects: string[] = Array.isArray(payload.objects)
+        ? [...new Set<string>(payload.objects.map(String))]
+        : [];
+      const mediaRoot = `episodes/${episodeId}/`;
+      const isUploadPath = (key: string) => key === bodyPath(episodeId)
+        || key.startsWith(`${mediaRoot}image-`)
+        || key.startsWith(`${mediaRoot}audio-`);
+      if (!technicalIdPattern.test(episodeId)
+        || !objects.length
+        || objects.some((key) => !validEpisodeKey(key, episodeId) || !isUploadPath(key))) {
+        return json(req, { error: "Nettoyage upload invalide." }, 400);
       }
-      const signed = [];
-      for (const key of objects) {
-        const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).createSignedUploadUrl(key, { upsert: true });
-        if (error) throw error;
-        signed.push({ key, token: data.token });
+      // Une sauvegarde peut avoir abouti côté serveur malgré une réponse réseau perdue.
+      // Ne jamais supprimer un objet désormais référencé par l'épisode.
+      const { data: episode, error: episodeError } = await supabase.from("episodes")
+        .select("storage_provider,data").eq("id", episodeId).maybeSingle();
+      if (episodeError) throw episodeError;
+      const referenced = new Set<string>();
+      if (episode?.data && episode.storage_provider === provider) {
+        const savedData = normalizeMediaData(episode.data, episodeId, episode.data.youtube ?? null);
+        for (const item of mediaItems(savedData)) referenced.add(item.key);
       }
-      return json(req, { objects: signed });
+      const removable = objects.filter((key) => !referenced.has(key));
+      await deleteObjects(supabase, provider, removable);
+      return json(req, { ok: true, removed: removable.length });
     }
 
     if (payload.action === "save") {
@@ -556,25 +620,49 @@ Deno.serve(async (req) => {
       if (provider === "supabase") {
         const markdown = String(payload.body ?? "");
         const path = bodyPath(episodeId);
-        const { error: bodyError } = await supabase.storage.from(SUPABASE_BUCKET).upload(
-          path,
-          new Blob([markdown], { type: "text/markdown;charset=utf-8" }),
-          { upsert: true, cacheControl: "120", contentType: "text/markdown;charset=utf-8" },
-        );
-        if (bodyError) throw bodyError;
-        const requested = [
-          { key: path, size: new TextEncoder().encode(markdown).byteLength, mime: "text/markdown;charset=utf-8" },
-          rawData.image,
-          rawData.audio,
-        ].filter(Boolean) as MediaItem[];
-        const actual = await supabaseObjectInfo(supabase, requested.map((item) => String(item.key)));
-        const byKey = (key: string, fallback: MediaItem) => actual.find((item) => item.key === key) ?? fallback;
+        const previousData = previous?.data
+          ? normalizeMediaData(previous.data, episodeId, previous.data.youtube ?? null)
+          : null;
+        const bodyChanged = payload.bodyChanged !== false
+          || !previousData
+          || previous?.storage_provider !== "supabase";
+        const requested: MediaItem[] = [];
+        let bodyItem = previousData?.body ?? null;
+        if (bodyChanged) {
+          const { error: bodyError } = await supabase.storage.from(SUPABASE_BUCKET).upload(
+            path,
+            new Blob([markdown], { type: "text/markdown;charset=utf-8" }),
+            { upsert: true, cacheControl: "120", contentType: "text/markdown;charset=utf-8" },
+          );
+          if (bodyError) throw bodyError;
+          bodyItem = {
+            key: path,
+            size: new TextEncoder().encode(markdown).byteLength,
+            mime: "text/markdown;charset=utf-8",
+          };
+          requested.push(bodyItem);
+        }
+        if (!bodyItem) throw new Error("Fichier body.md absent.");
+
+        for (const kind of ["image", "audio"] as const) {
+          const incomingItem = rawData[kind] as MediaItem | null | undefined;
+          const previousItem = previousData?.[kind] ?? null;
+          if (incomingItem && (previous?.storage_provider !== "supabase" || incomingItem.key !== previousItem?.key)) {
+            requested.push(incomingItem);
+          }
+        }
+        const actual = requested.length
+          ? await supabaseObjectInfo(supabase, requested.map((item) => String(item.key)))
+          : [];
+        const byKey = (item: MediaItem | null) => item
+          ? actual.find((candidate) => candidate.key === item.key) ?? item
+          : null;
         data = normalizeMediaData({
-          body: byKey(path, requested[0]),
-          image: rawData.image ? byKey(String((rawData.image as MediaItem).key), rawData.image as MediaItem) : null,
-          audio: rawData.audio ? byKey(String((rawData.audio as MediaItem).key), rawData.audio as MediaItem) : null,
+          body: byKey(bodyItem),
+          image: byKey((rawData.image as MediaItem | null) ?? null),
+          audio: byKey((rawData.audio as MediaItem | null) ?? null),
         }, episodeId, youtube);
-        await verifySupabase(supabase, mediaItems(data));
+        if (requested.length) await verifySupabase(supabase, requested, actual);
       } else {
         await r2WriteContext(supabase);
         data = normalizeMediaData(incoming.data, episodeId, youtube);
@@ -688,7 +776,7 @@ Deno.serve(async (req) => {
       await deleteObjects(supabase, job.source_provider, mediaItems(data).map((item) => item.key));
       const removed = await supabase.from("tba_storage_jobs").delete().eq("episode_id", job.episode_id);
       if (removed.error) throw removed.error;
-      return json(req, { ok: true, provider: job.target_provider });
+      return json(req, { ok: true, provider: job.target_provider, data, storageBytes: total });
     }
 
     if (payload.action === "migration-error") {

@@ -309,8 +309,10 @@ export function MarkdownEditor({ value, onValidate, onCancel }) {
     const root = rootRef.current;
     const scroller = editor.getScrollerElement();
     const viewport = window.visualViewport || null;
+    const mobilePointer = window.matchMedia("(pointer: coarse)");
     let lastHeight = -1;
     let lastTop = -1;
+    let largestViewportHeight = Math.round(viewport ? viewport.height : window.innerHeight);
     let lockUntil = 0;
     let selfScroll = false;
     let touchActive = false;
@@ -328,14 +330,31 @@ export function MarkdownEditor({ value, onValidate, onCancel }) {
       const heightChanged = height !== lastHeight;
       lastHeight = height;
       lastTop = top;
+      largestViewportHeight = Math.max(largestViewportHeight, height);
       root.style.height = `${height}px`;
       root.style.top = `${top}px`;
       if (heightChanged || force) editor.refresh();
     };
-    const keepCursorVisible = () => {
-      if (Date.now() < lockUntil) return;
+    const keepCursorVisible = (centerForKeyboard = false) => {
+      const viewportHeight = Math.round(viewport ? viewport.height : window.innerHeight);
+      const keyboardOpen = mobilePointer.matches
+        && editor.hasFocus()
+        && largestViewportHeight - viewportHeight > 120;
+      if (!centerForKeyboard && Date.now() < lockUntil) return;
       const info = editor.getScrollInfo();
       const cursor = editor.cursorCoords(null, "local");
+      if (centerForKeyboard && keyboardOpen) {
+        const cursorMiddle = (cursor.top + cursor.bottom) / 2;
+        const target = Math.max(0, Math.min(
+          cursorMiddle - info.clientHeight / 2,
+          Math.max(0, info.height - info.clientHeight),
+        ));
+        if (Math.abs(target - info.top) < 2) return;
+        selfScroll = true;
+        editor.scrollTo(null, target);
+        window.setTimeout(() => { selfScroll = false; }, 60);
+        return;
+      }
       const margin = 90;
       const viewBottom = info.top + info.clientHeight;
       if (cursor.top >= info.top + 12 && cursor.bottom <= viewBottom - margin) return;
@@ -388,12 +407,17 @@ export function MarkdownEditor({ value, onValidate, onCancel }) {
       touchFinishTimer = window.setTimeout(() => fit(), 450);
     };
     const onViewportResize = () => {
-      fit();
-      if (!touchActive) lockUntil = 0;
-      window.setTimeout(keepCursorVisible, 90);
+      // L'ouverture du clavier arrive souvent avant touchend sur mobile : le fit et
+      // le recentrage doivent alors ignorer temporairement le verrou tactile.
+      fit(true);
+      lockUntil = 0;
+      window.setTimeout(() => keepCursorVisible(true), 90);
     };
     const onViewportScroll = () => fit();
-    const onOrientationChange = () => window.setTimeout(() => fit(true), 250);
+    const onOrientationChange = () => window.setTimeout(() => {
+      largestViewportHeight = Math.round(viewport ? viewport.height : window.innerHeight);
+      fit(true);
+    }, 250);
     const onWindowResize = () => fit();
     const onShellMouseDown = (event) => {
       if (event.target !== shellRef.current) return;

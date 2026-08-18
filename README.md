@@ -22,7 +22,7 @@ Ce document décrit l’architecture actuellement déployée. Il ne doit conteni
 
 ### Espace créateur
 
-L’administration est protégée par un PIN partagé de six chiffres et comporte une navigation compacte à trois boutons :
+L’administration utilise un compte Supabase Auth unique, identifié par une clé publique fixe et protégé par un PIN de six chiffres. La session est conservée sur l’appareil pendant sept jours et peut être fermée immédiatement avec **Déconnexion**. L’espace comporte une navigation compacte à trois boutons :
 
 1. le bouton de mode bascule entre **Contenu** et **Infrastructure** ;
 2. l’action principale ouvre **Créer** ou **Stockage** ;
@@ -57,12 +57,13 @@ Entrer dans l’écran Stockage ne déclenche pas une nouvelle lecture. Le bouto
 - **Vite 6** : développement et build statique.
 - **Supabase PostgreSQL** : métadonnées, paramètres et suivi des migrations.
 - **Supabase Storage** : stockage principal des fichiers.
-- **Supabase Edge Functions** : validation du PIN et opérations privilégiées.
+- **Supabase Auth** : session administrateur persistante et JWT.
+- **Supabase Edge Functions** : validation du rôle Auth et opérations privilégiées R2/stockage.
 - **Cloudflare R2** : stockage secondaire compatible S3.
 - **aws4fetch** : signature côté Edge Function des URL d’envoi direct vers R2.
 - **zip.js** : création progressive de l’archive complète dans le navigateur.
 - **Firebase Hosting** : hébergement du build et réécriture SPA.
-- **localStorage** : cache vitrine, signets, corps Markdown récents et clé TBA chargée.
+- **localStorage** : cache vitrine, configuration publique R2, signets, corps Markdown récents, clé TBA et limite locale de session admin.
 - **react-markdown** et **remark-gfm** : rendu Markdown.
 
 Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou WebSocket et `public.episodes` a été retirée de la publication `supabase_realtime`.
@@ -258,19 +259,18 @@ Ne jamais placer un secret Cloudflare dans React, Firebase Hosting ou ce README.
 
 ## Edge Function `tba-admin`
 
-La fonction accepte uniquement `POST`. La passerelle Supabase ne vérifie pas de session Auth pour ce point d’entrée ; l’autorisation applicative repose sur le PIN vérifié dans la fonction.
+La fonction accepte uniquement `POST`. Sauf pour l’amorçage unique du compte, chaque action exige un JWT Supabase Auth valide portant le rôle non modifiable `tba_admin` dans `app_metadata`. La passerelle reste en mode `--no-verify-jwt` uniquement pour permettre le premier amorçage ; la fonction vérifie elle-même toutes les autorisations.
 
 | Action | Usage |
 | --- | --- |
-| `verify` | Vérifier le PIN. |
+| `bootstrap-admin` | Créer une seule fois le compte Supabase Auth à partir du PIN historique valide. |
+| `verify` | Vérifier la session Auth. |
 | `storage-status` | Lire quotas, fournisseurs, jobs et fichiers orphelins. |
 | `settings-save` | Enregistrer activation et seuils de migration. |
-| `change-pin` | Remplacer le hash du PIN dans Vault. |
+| `change-pin` | Modifier le mot de passe PIN du compte Supabase Auth. |
 | `r2-setup` | Créer et connecter le bucket R2. |
 | `r2-custom-domain` | Enregistrer puis activer un domaine personnalisé R2 lorsque son DNS et TLS sont actifs. |
 | `r2-upload-urls` | Produire des URL d’envoi signées et limitées aux objets de l’épisode. |
-| `sign-upload` | Créer une URL d’upload Supabase signée. |
-| `migration-supabase-sign` | Signer les objets lors d’un retour vers Supabase. |
 | `save` | Valider et enregistrer un épisode. |
 | `migration-start` | Préparer ou reprendre une migration. |
 | `migration-finish` | Vérifier, basculer le fournisseur et nettoyer la source. |
@@ -278,7 +278,7 @@ La fonction accepte uniquement `POST`. La passerelle Supabase ne vérifie pas de
 | `delete` | Supprimer l’épisode et ses fichiers chez son fournisseur. |
 | `renumber` | Appeler la RPC de renumérotation. |
 
-Le PIN est limité à six chiffres. Son hash et les secrets R2 sont stockés dans Vault. Une limitation temporaire en mémoire ralentit les tentatives de PIN incorrectes. Ce modèle convient au cercle privé prévu pour le projet, mais ne remplace pas Supabase Auth pour un produit public multi-utilisateur.
+Le hash historique du PIN reste temporairement dans Vault pour amorcer le compte Auth sur une installation existante. Après création, le PIN est géré par Supabase Auth et n’est plus envoyé à chaque opération. Les secrets R2 restent exclusivement dans Vault. La clé utilisateur intégrée au JavaScript est publique ; la sécurité repose sur le mot de passe, la session, `app_metadata`, RLS et les policies Storage.
 
 CORS accepte les origines locales privées nécessaires au développement et les domaines Firebase TBA. CORS n’est pas un mécanisme d’authentification.
 
@@ -287,7 +287,9 @@ CORS accepte les origines locales privées nécessaires au développement et les
 ## Lecture publique, RLS et Realtime
 
 - `public.episodes` est lisible par le frontend public selon ses politiques RLS.
-- Aucune écriture PostgreSQL publique n’est autorisée.
+- `anon` ne possède que le droit `SELECT` nécessaire ; aucune écriture PostgreSQL publique n’est accordée.
+- Les écritures `episodes` et `storage.objects` exigent une session `authenticated` portant le rôle `tba_admin`.
+- Le bucket reste public pour la lecture directe des médias, sans autoriser les écritures anonymes.
 - Les opérations privilégiées utilisent la clé serveur uniquement dans l’Edge Function.
 - Les clés publishable visibles dans le navigateur ne sont pas des secrets.
 - Aucun composant n’utilise Supabase Realtime.
@@ -406,6 +408,8 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 ### Administration
 
 - Un mauvais PIN est refusé.
+- Une session valide rouvre l’administration sans redemander le PIN pendant sept jours sur l’appareil.
+- Déconnexion ferme la session locale immédiatement.
 - Création, modification, suppression et renumérotation conservent les identifiants stables.
 - Un fichier supérieur à 50 Mo sélectionne R2.
 - Une migration vérifie la destination avant de supprimer la source.
@@ -434,7 +438,7 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 
 ## Limites connues
 
-- Le PIN partagé n’est pas une authentification forte.
+- Un PIN de six chiffres reste moins robuste qu’un mot de passe long ; Supabase Auth et les restrictions RLS limitent son périmètre au compte administrateur unique.
 - Les clés TBA filtrent l’affichage mais ne constituent pas une autorisation serveur.
 - Les buckets publics rendent les fichiers accessibles à toute personne possédant leur URL.
 - La migration navigateur exige que l’administration reste ouverte pendant la copie.
@@ -465,6 +469,8 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 ## Documentation utile
 
 - [Supabase Storage](https://supabase.com/docs/guides/storage)
+- [Supabase Auth](https://supabase.com/docs/guides/auth)
+- [Supabase RLS](https://supabase.com/docs/guides/database/postgres/row-level-security)
 - [Supabase Edge Functions](https://supabase.com/docs/guides/functions)
 - [Supabase Vault](https://supabase.com/docs/guides/database/vault)
 - [Cloudflare R2](https://developers.cloudflare.com/r2/)
