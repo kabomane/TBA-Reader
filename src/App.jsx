@@ -25,7 +25,6 @@ import {
   signInAdmin,
   signOutAdmin,
   setupR2,
-  setupR2CustomDomain,
   toggleR2,
   watchAdminSession,
   watchEpisodes,
@@ -837,13 +836,11 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
   </section>;
 }
 
-function SettingsPanel({ status, busy, onSave, onSetupR2, onSetupR2CustomDomain, onToggleR2, onChangePin }) {
+function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePin }) {
   const [autoMigrationEnabled, setAutoMigrationEnabled] = useState(false);
   const [triggerPercent, setTriggerPercent] = useState(75);
   const [targetPercent, setTargetPercent] = useState(60);
   const [cloudflare, setCloudflare] = useState({ accountId: "", apiToken: "", parentAccessKeyId: "", bucket: "tba-reader-media" });
-  const [customDomain, setCustomDomain] = useState("cr2.bizave.kabomane.me");
-  const [zoneId, setZoneId] = useState("");
   const [nextPin, setNextPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [message, setMessage] = useState("");
@@ -875,13 +872,6 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onSetupR2CustomDomain,
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSetupR2(cloudflare), "Cloudflare R2 est prêt.")}>{status?.settings?.r2Ready ? "Tester et reconfigurer" : "Créer et connecter R2"}</button>
     </section>
     <section className="settings-card">
-      <div className="settings-card-heading"><div><span>Cloudflare</span><h3>Domaine public R2</h3></div></div>
-      <p>Connecte le bucket à ton domaine. Après la première demande, ajoute l’entrée DNS indiquée par Cloudflare puis relance cette action pour l’activer.</p>
-      <div className="settings-grid"><label className="wide"><span>Domaine</span><input inputMode="url" value={customDomain} onChange={(event) => setCustomDomain(event.target.value.trim().toLowerCase())}/></label><label className="wide"><span>Zone ID Cloudflare</span><input value={zoneId} onChange={(event) => setZoneId(event.target.value.trim())} placeholder="Zone de kabomane.me"/></label></div>
-      <button className="settings-primary" type="button" disabled={busy || !status?.settings?.r2Ready || !customDomain || !zoneId} onClick={() => run(async () => { const result = await onSetupR2CustomDomain(customDomain, zoneId); if (!result.active) throw new Error("Domaine enregistré : ajoute l’entrée DNS demandée par Cloudflare, attends le certificat TLS, puis relance ce bouton."); }, "Le domaine public R2 est actif.")}>Connecter {customDomain}</button>
-      {status?.settings?.r2PublicUrl && <small>URL active : {status.settings.r2PublicUrl}</small>}
-    </section>
-    <section className="settings-card">
       <div className="settings-card-heading"><div><span>Sécurité</span><h3>Changer le PIN</h3></div></div>
       <div className="settings-grid"><label><span>Nouveau PIN</span><input type="password" inputMode="numeric" maxLength="6" value={nextPin} onChange={(event) => setNextPin(event.target.value.replace(/\D/g, "").slice(0, 6))}/></label><label><span>Confirmation</span><input type="password" inputMode="numeric" maxLength="6" value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, "").slice(0, 6))}/></label></div>
       <button className="settings-primary" type="button" disabled={busy || nextPin.length !== 6 || nextPin !== confirmPin} onClick={() => run(async () => { await onChangePin(nextPin); setNextPin(""); setConfirmPin(""); }, "PIN modifié. Il sera demandé à la prochaine connexion.")}>Modifier le PIN</button>
@@ -889,7 +879,7 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onSetupR2CustomDomain,
   </section>;
 }
 
-function Admin({ authReady, authenticated, episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onRenumber, onSignIn, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onSetupR2CustomDomain, onToggleR2, onChangePin, onMigrate, onClose }) {
+function Admin({ authReady, authenticated, episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onRenumber, onSignIn, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
   const [pin, setPin] = useState("");
   const [checkingPin, setCheckingPin] = useState(false);
   const [error, setError] = useState("");
@@ -1115,12 +1105,12 @@ function Admin({ authReady, authenticated, episodes, markdownOpen, onMarkdownOpe
       <div className="pin-panel">
         <div className="pin-icon"><Icon name="lock" size={27}/></div>
         <p className="eyebrow">Espace privé</p>
-        <p className="pin-intro">Entre code PIN. Validation automatique au sixième chiffre.</p>
+        <p className="pin-intro">Entre code PIN.</p>
         <label>
           <input autoFocus inputMode="numeric" autoComplete="one-time-code" maxLength="6" value={pin} onChange={(event) => { setError(""); setPin(event.target.value.replace(/\D/g, "").slice(0, 6)); }} placeholder="••••••" aria-label="Code PIN" aria-invalid={Boolean(error)}/>
         </label>
         <div className="pin-progress" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <i className={index < pin.length ? "filled" : ""} key={index}/>)}</div>
-        <p className={`pin-status ${error ? "error" : ""}`} aria-live="polite">{error || (checkingPin ? "Vérification…" : `${pin.length}/6 chiffres`)}</p>
+        {(error || checkingPin) && <p className={`pin-status ${error ? "error" : ""}`} aria-live="polite">{error || "Vérification…"}</p>}
       </div>
     </section>
   );
@@ -1247,7 +1237,6 @@ function Admin({ authReady, authenticated, episodes, markdownOpen, onMarkdownOpe
           busy={settingsBusy}
           onSave={async (nextSettings) => { setSettingsBusy(true); try { await onSaveStorageSettings(nextSettings); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onSetupR2={async (config) => { setSettingsBusy(true); try { await onSetupR2(config); await refreshStorage(); } finally { setSettingsBusy(false); } }}
-          onSetupR2CustomDomain={async (domain, zoneId) => { setSettingsBusy(true); try { return await onSetupR2CustomDomain(domain, zoneId); } finally { await refreshStorage(); setSettingsBusy(false); } }}
           onToggleR2={async (enabled) => { setSettingsBusy(true); try { await onToggleR2(enabled); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onChangePin={async (nextPin) => { setSettingsBusy(true); try { await onChangePin(nextPin); } finally { setSettingsBusy(false); } }}
         />}
@@ -1546,7 +1535,7 @@ export default function App() {
       <div className="atmosphere" aria-hidden="true"/>
       {!adminMarkdownOpen && <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={adminOpen && adminSession ? logoutAdmin : openAdmin} aria-label={adminOpen && adminSession ? "Déconnexion" : "Espace créateur"}><Icon name="lock" size={16}/> {adminOpen && adminSession ? "Déconnexion" : "Créer"}</button></header>}
       <main>
-        {adminOpen ? <Admin authReady={adminAuthReady} authenticated={Boolean(adminSession)} episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onSignIn={authenticateAdmin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onSetupR2CustomDomain={setupR2CustomDomain} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
+        {adminOpen ? <Admin authReady={adminAuthReady} authenticated={Boolean(adminSession)} episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onSignIn={authenticateAdmin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
           : readerView()}
       </main>
       {!adminOpen && <footer><div className="footer-brand"><Icon name="lock" size={14}/> TBA Reader</div><span>© 2026 — Bizave Corp.</span></footer>}

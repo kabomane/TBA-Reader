@@ -70,6 +70,7 @@ const GROUPS = {
     { action: "link", label: "Lien", hint: "[ ]( )" },
     { action: "image", label: "Image", hint: "![ ]( )" },
     { action: "table", label: "Tableau", hint: "| |" },
+    { action: "linebreak", label: "Saut de ligne", hint: "\\n" },
   ],
   accent: [
     { action: "hilite", label: "Texte accentué", hint: "== ==", className: "go" },
@@ -90,7 +91,7 @@ const GROUP_BUTTONS = [
   { group: "title", label: "Titre", title: "Titres" },
   { group: "style", label: "Style", title: "Mise en forme du texte" },
   { group: "list", label: "Liste", title: "Listes et cases à cocher" },
-  { group: "insert", label: "Insérer", title: "Lien, image, tableau" },
+  { group: "insert", label: "Insérer", title: "Lien, image, tableau, saut de ligne" },
   { group: "accent", label: "Accent", title: "Citation, accentuation, séparateurs" },
 ];
 
@@ -211,6 +212,7 @@ export function MarkdownEditor({ value, onValidate, onCancel }) {
       case "quote": prefixLines(() => "> ", /^>\s?/); break;
       case "link": wrap("[", "](https://)", editor.getSelection() ? "" : "texte du lien"); break;
       case "image": wrap("![", "](https://)", editor.getSelection() ? "" : "texte alternatif"); break;
+      case "linebreak": editor.replaceSelection("\\\n", "end"); break;
       case "hr": insertBlock("---"); break;
       case "seplabel": insertBlock("--- titre de section", true); break;
       case "table": insertBlock("| Colonne | Colonne |\n|---|---|\n| Valeur | Valeur |\n| Valeur | Valeur |"); break;

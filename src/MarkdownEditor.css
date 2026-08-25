@@ -173,11 +173,11 @@
 .markdown-preview-body li { margin: .25em 0; }
 .markdown-preview-body li::marker { color: var(--md-gold-soft); }
 .markdown-preview-body ul.contains-task-list { padding-left: 0; list-style: none; }
-.markdown-preview-body .markdown-task { position: relative; padding-left: 1.85em; }
-.markdown-preview-body .markdown-task::before { content: ""; position: absolute; top: .4em; left: 0; width: 1.02em; height: 1.02em; border: 1px solid var(--md-gold-dim); border-radius: 4px; }
+.markdown-preview-body .markdown-task { --task-box-size: 1.02em; position: relative; padding-left: 1.85em; }
+.markdown-preview-body .markdown-task::before { content: ""; position: absolute; top: calc((1lh - var(--task-box-size)) / 2); left: 0; box-sizing: border-box; width: var(--task-box-size); height: var(--task-box-size); border: 1px solid var(--md-gold-dim); border-radius: 4px; }
 .markdown-preview-body .markdown-task.done { color: var(--md-text-dim); }
 .markdown-preview-body .markdown-task.done::before { border-color: var(--md-gold); background: var(--md-gold); }
-.markdown-preview-body .markdown-task.done::after { content: ""; position: absolute; top: .66em; left: .26em; width: .46em; height: .22em; border-bottom: 2px solid #15130e; border-left: 2px solid #15130e; transform: rotate(-45deg); }
+.markdown-preview-body .markdown-task.done::after { content: ""; position: absolute; top: calc((1lh - var(--task-box-size)) / 2 + .26em); left: .26em; width: .46em; height: .22em; border-bottom: 2px solid #15130e; border-left: 2px solid #15130e; transform: rotate(-45deg); }
 .markdown-preview-body blockquote { margin: 0 0 1.1em; padding: .1em 0 .1em 1.1em; border-left: 2px solid var(--md-gold-soft); color: var(--md-text-dim); font-style: italic; }
 .markdown-preview-body code { padding: .1em .4em; border: 1px solid var(--md-rule); border-radius: 4px; background: var(--md-bg-3); color: #e2d7bd; font: .82em "IBM Plex Mono", monospace; }
 .markdown-preview-body pre { margin: 0 0 1.2em; padding: 14px 16px; overflow-x: auto; border: 1px solid var(--md-rule); border-radius: 9px; background: #000; color: #ded3b8; font-size: .8em; line-height: 1.6; }
