@@ -340,6 +340,41 @@ function FormatFilter({ value, onChange, options = FORMAT_OPTIONS }) {
   );
 }
 
+function ArchiveControlMenu({ title, summary, active, sections, disabled = false }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef(null);
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOutside = (event) => {
+      if (!root.current?.contains(event.target)) setOpen(false);
+    };
+    const closeWithKeyboard = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeWithKeyboard);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeWithKeyboard);
+    };
+  }, [open]);
+  return <div className="format-filter archive-choice-filter" ref={root}>
+    <button className={`format-trigger ${active ? "active" : ""}`} type="button" onClick={() => setOpen((current) => !current)} disabled={disabled} aria-expanded={open} aria-haspopup="dialog">
+      <Icon name="filter"/><span>{summary}</span><Icon name="chevron" size={16}/>
+    </button>
+    {open && <div className="archive-control-menu" role="dialog" aria-label={title}>
+      <div className="archive-control-menu-heading"><strong>{title}</strong><button type="button" onClick={() => setOpen(false)} aria-label="Fermer"><Icon name="close" size={16}/></button></div>
+      {sections.map((section) => <section className="archive-control-group" key={section.label}>
+        <span>{section.label}</span>
+        <div>{section.options.map((option) => <button className={section.value === option.value ? "selected" : ""} type="button" aria-pressed={section.value === option.value} key={option.value} onClick={() => section.onChange(option.value)}>{option.label}</button>)}</div>
+      </section>)}
+    </div>}
+  </div>;
+}
+
 function parseDateValue(value) {
   const [year, month, day] = value.split("-").map(Number);
   return year && month && day ? new Date(year, month - 1, day) : new Date();
@@ -679,6 +714,32 @@ function Empty({ title, text }) {
   return <div className="empty"><span>Ø</span><h2>{title}</h2><p>{text}</p></div>;
 }
 
+function pause(duration) {
+  return new Promise((resolve) => window.setTimeout(resolve, duration));
+}
+
+async function waitForDownloadReturn() {
+  if (document.visibilityState !== "visible") {
+    await new Promise((resolve) => {
+      const check = () => {
+        if (document.visibilityState !== "visible") return;
+        document.removeEventListener("visibilitychange", check);
+        window.removeEventListener("focus", check);
+        window.removeEventListener("pageshow", check);
+        resolve();
+      };
+      document.addEventListener("visibilitychange", check);
+      window.addEventListener("focus", check);
+      window.addEventListener("pageshow", check);
+    });
+  }
+  await pause(1000);
+}
+
+function isNetworkFailure(error) {
+  return error instanceof TypeError || /load failed|failed to fetch|network/i.test(String(error?.message || ""));
+}
+
 function SkeletonLine({ className = "" }) {
   return <span className={`skeleton-surface skeleton-line ${className}`.trim()}/>;
 }
@@ -761,8 +822,7 @@ function formatBytes(bytes = 0) {
   return `${(value / 1_000_000_000).toFixed(2)} Go`;
 }
 
-function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigrate }) {
-  const [archive, setArchive] = useState({ running: false, message: "", errors: 0, current: 0, total: 0 });
+function StoragePanel({ episodes, episodesReady, status, loading, migrating, onRefresh, onMigrate, onOpenArchive }) {
   if (loading && !status) return <section className="storage-panel"><div className="storage-loading"><span className="button-spinner"/>Lecture du stockage…</div></section>;
   const config = status?.settings ?? {};
   const used = Number(status?.supabaseBytes ?? 0);
@@ -771,26 +831,7 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
   const r2Used = Number(status?.r2Bytes ?? 0);
   const r2Percent = Math.min(100, r2Used / R2_INCLUDED_BYTES * 100);
   const r2PercentLabel = r2Percent > 0 && r2Percent < 0.1 ? r2Percent.toFixed(2) : r2Percent.toFixed(1);
-  const archiveBytes = episodes.reduce((sum, episode) => sum + Number(episode.storageBytes || 0), 0);
   const jobByEpisode = new Map((status?.jobs ?? []).map((job) => [job.episode_id, job]));
-  const startArchive = async (event) => {
-    event.preventDefault();
-    if (archive.running) return;
-    setArchive({ running: true, message: "Préparation…", errors: 0, current: 0, total: 0 });
-    try {
-      const { downloadEpisodeArchive } = await import("./archive.js");
-      const result = await downloadEpisodeArchive({
-        onProgress: ({ current, total, label }) => setArchive((state) => ({ ...state, current, total, message: label })),
-      });
-      setArchive({ running: false, message: result.errors.length ? `Archive créée · ${result.errors.length} fichier${result.errors.length > 1 ? "s" : ""} manquant${result.errors.length > 1 ? "s" : ""}` : "Archive téléchargée", errors: result.errors.length, current: result.episodes, total: result.episodes });
-    } catch (error) {
-      if (error?.name === "AbortError") {
-        setArchive({ running: false, message: "Téléchargement annulé", errors: 0, current: 0, total: 0 });
-      } else {
-        setArchive({ running: false, message: error?.message || "Archive impossible", errors: 1, current: 0, total: 0 });
-      }
-    }
-  };
   return <section className="storage-panel">
     <header className="manage-heading storage-heading">
       <div><p className="eyebrow">Infrastructure</p><h2>Stockage</h2></div>
@@ -811,15 +852,15 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
         <span>Migration automatique</span><strong>{config.autoMigrationEnabled && config.r2Enabled ? "Active" : config.autoMigrationEnabled ? "Suspendue" : "Désactivée"}</strong>
         <span>Fichiers orphelins</span><strong>{status?.orphan?.objects ?? 0} · {formatBytes(status?.orphan?.bytes)}</strong>
       </article>
-      <article className="storage-card compact archive-card" id="telecharger-archive">
-        <span>Télécharger l’archive</span>
-        <a href="#telecharger-archive" onClick={startArchive} aria-disabled={archive.running} aria-busy={archive.running}>{archive.running ? `${archive.current}/${archive.total || "…"}` : "Télécharger"}</a>
-        <small className={archive.errors ? "error" : ""} aria-live="polite">{archive.message || `${episodes.length} épisode${episodes.length > 1 ? "s" : ""} · ${formatBytes(archiveBytes)}${typeof window.showSaveFilePicker === "function" ? "" : " · préparation en mémoire"}`}</small>
+      <article className="storage-card compact archive-card">
+        <span>Archiver les épisodes</span>
+        <button type="button" onClick={onOpenArchive} disabled={!episodesReady}>Choisir</button>
+        <small>{episodesReady ? `${episodes.length} épisode${episodes.length > 1 ? "s" : ""} · sélection, filtres et nettoyage` : "Chargement des épisodes…"}</small>
       </article>
     </div>
     <div className="storage-episodes">
-      <div className="storage-list-heading"><h3>Épisodes</h3><span>{episodes.length} au total</span></div>
-      {episodes.map((episode) => {
+      <div className="storage-list-heading"><h3>Épisodes</h3><span>{episodesReady ? `${episodes.length} au total` : "Chargement…"}</span></div>
+      {episodesReady && episodes.map((episode) => {
         const job = jobByEpisode.get(episode.uid);
         const busy = migrating?.episodeId === episode.uid || (job && job.status !== "error");
         const target = episode.storageProvider === "r2" ? "supabase" : "r2";
@@ -832,7 +873,165 @@ function StoragePanel({ episodes, status, loading, migrating, onRefresh, onMigra
           <button type="button" className={busy ? "is-busy" : ""} onClick={() => onMigrate(episode, target)} disabled={busy || tooLargeForSupabase || (target === "r2" && !config.r2Enabled)} aria-busy={busy}>{busy ? `${migrating?.current ?? 0}/${migrating?.total ?? 0}` : `Vers ${target === "r2" ? "R2" : "Supabase"}`}</button>
         </article>;
       })}
+      {!episodesReady && <div className="storage-loading"><span className="button-spinner"/>Lecture des épisodes…</div>}
     </div>
+  </section>;
+}
+
+function ArchivePanel({ episodes, onDelete, onForgetEpisode, onRefresh, onBack }) {
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [type, setType] = useState("Tous");
+  const [tag, setTag] = useState("");
+  const [sortBy, setSortBy] = useState("number");
+  const [direction, setDirection] = useState("asc");
+  const [deleteAfterArchive, setDeleteAfterArchive] = useState(false);
+  const [operation, setOperation] = useState({ running: false, message: "", current: 0, total: 0, errors: 0, details: [] });
+  const allTags = useMemo(() => [...new Set(episodes.flatMap((episode) => episode.tags ?? []))].sort(), [episodes]);
+  const typeOptions = FORMAT_OPTIONS;
+  const tagOptions = [{ value: "", label: "Tous les sujets" }, ...allTags.map((item) => ({ value: item, label: `#${item}` }))];
+  const sortOptions = [{ value: "number", label: "Numéro" }, { value: "date", label: "Date" }, { value: "weight", label: "Poids" }];
+  const directionOptions = [{ value: "asc", label: "Croissant" }, { value: "desc", label: "Décroissant" }];
+  const filterSummary = type === "Tous" && !tag ? "Tous formats · Tous sujets" : `${displayType(type)}${tag ? ` · #${tag}` : " · Tous sujets"}`;
+  const sortSummary = `${sortOptions.find((option) => option.value === sortBy)?.label} · ${directionOptions.find((option) => option.value === direction)?.label}`;
+  const visibleEpisodes = useMemo(() => episodes
+    .filter((episode) => (type === "Tous" || episode.type === type) && (!tag || episode.tags?.includes(tag)))
+    .sort((a, b) => {
+      const left = sortBy === "date" ? new Date(a.date).getTime() : sortBy === "weight" ? Number(a.storageBytes || 0) : Number(a.number || 0);
+      const right = sortBy === "date" ? new Date(b.date).getTime() : sortBy === "weight" ? Number(b.storageBytes || 0) : Number(b.number || 0);
+      const result = left - right || Number(a.number || 0) - Number(b.number || 0);
+      return direction === "asc" ? result : -result;
+    }), [direction, episodes, sortBy, tag, type]);
+  const selectedEpisodes = useMemo(() => episodes.filter((episode) => selectedIds.has(episode.uid)), [episodes, selectedIds]);
+  const selectedBytes = selectedEpisodes.reduce((sum, episode) => sum + Number(episode.storageBytes || 0), 0);
+  const selectedVisibleCount = visibleEpisodes.filter((episode) => selectedIds.has(episode.uid)).length;
+  const allVisibleSelected = visibleEpisodes.length > 0 && selectedVisibleCount === visibleEpisodes.length;
+  useEffect(() => {
+    const existingIds = new Set(episodes.map((episode) => episode.uid));
+    setSelectedIds((current) => new Set([...current].filter((id) => existingIds.has(id))));
+  }, [episodes]);
+  const toggleEpisode = (id) => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+  const toggleVisible = () => setSelectedIds((current) => {
+    const next = new Set(current);
+    if (allVisibleSelected) visibleEpisodes.forEach((episode) => next.delete(episode.uid));
+    else visibleEpisodes.forEach((episode) => next.add(episode.uid));
+    return next;
+  });
+  const activateWithKeyboard = (event, action) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    action();
+  };
+  const startArchive = async () => {
+    if (!selectedIds.size || operation.running) return;
+    setOperation({ running: true, message: "Préparation…", current: 0, total: selectedIds.size, errors: 0, details: [] });
+    try {
+      const { downloadEpisodeArchive } = await import("./archive.js");
+      const result = await downloadEpisodeArchive({
+        episodeIds: [...selectedIds],
+        onProgress: ({ current, total, label }) => setOperation((state) => ({ ...state, current, total, message: label })),
+      });
+      const deletedIds = [];
+      const deletionErrors = [];
+      if (deleteAfterArchive) {
+        setOperation((state) => ({ ...state, current: 0, total: result.completeEpisodeIds.length, message: "Archive prête · attente du navigateur" }));
+        await waitForDownloadReturn();
+        for (let index = 0; index < result.completeEpisodeIds.length; index += 1) {
+          const id = result.completeEpisodeIds[index];
+          const episode = episodes.find((item) => item.uid === id);
+          if (!episode) continue;
+          setOperation((state) => ({ ...state, current: index + 1, total: result.completeEpisodeIds.length, message: `Suppression · ${episode.title}` }));
+          let deletionError = null;
+          let deleted = false;
+          let reconcileLocalState = false;
+          for (let attempt = 0; attempt < 2 && !deleted; attempt += 1) {
+            try {
+              await onDelete(episode);
+              deleted = true;
+            } catch (error) {
+              deletionError = error;
+              const status = await onRefresh();
+              const stillExists = status ? (status.episodes ?? []).some((item) => item.id === id) : null;
+              if (stillExists === false) {
+                deleted = true;
+                reconcileLocalState = true;
+              } else if (attempt === 0 && isNetworkFailure(error)) {
+                setOperation((state) => ({ ...state, message: `Nouvelle tentative · ${episode.title}` }));
+                await pause(1000);
+              } else {
+                break;
+              }
+            }
+          }
+          if (deleted) {
+            deletedIds.push(id);
+            if (reconcileLocalState) onForgetEpisode(episode);
+          } else {
+            deletionErrors.push(`TBA ${formatEpisodeNumber(episode.number)} — suppression : ${deletionError?.message || "échec inconnu"}`);
+          }
+        }
+        if (result.completeEpisodeIds.length) await onRefresh();
+      }
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        deletedIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      const archiveSummary = `${result.episodes} épisode${result.episodes > 1 ? "s" : ""} archivé${result.episodes > 1 ? "s" : ""}`;
+      const incompleteSummary = result.incompleteEpisodeIds.length ? ` · ${result.incompleteEpisodeIds.length} incomplet${result.incompleteEpisodeIds.length > 1 ? "s" : ""} conservé${result.incompleteEpisodeIds.length > 1 ? "s" : ""}` : "";
+      const deleteSummary = deleteAfterArchive ? ` · ${deletedIds.length} supprimé${deletedIds.length > 1 ? "s" : ""}` : "";
+      setOperation({
+        running: false,
+        message: `${archiveSummary}${incompleteSummary}${deleteSummary}`,
+        current: result.episodes,
+        total: result.episodes,
+        errors: result.errors.length + deletionErrors.length,
+        details: [...result.errors, ...deletionErrors],
+      });
+    } catch (error) {
+      setOperation({
+        running: false,
+        message: error?.name === "AbortError" ? "Téléchargement annulé · aucune suppression" : error?.message || "Archive impossible",
+        current: 0,
+        total: 0,
+        errors: error?.name === "AbortError" ? 0 : 1,
+        details: [],
+      });
+    }
+  };
+  return <section className="archive-manager">
+    <header className="manage-heading archive-manager-heading">
+      <div><p className="eyebrow">Infrastructure</p><h2>Archiver</h2></div>
+      <button type="button" className="storage-refresh" onClick={onBack} disabled={operation.running}><Icon name="back" size={16}/> Stockage</button>
+    </header>
+    <div className="archive-controls">
+      <div className="archive-control"><span>Filtrer</span><ArchiveControlMenu title="Filtrer les épisodes" summary={filterSummary} active={type !== "Tous" || Boolean(tag)} disabled={operation.running} sections={[{ label: "Format", value: type, options: typeOptions, onChange: setType }, { label: "Hashtag", value: tag, options: tagOptions, onChange: setTag }]}/></div>
+      <div className="archive-control"><span>Trier</span><ArchiveControlMenu title="Trier les épisodes" summary={sortSummary} active={sortBy !== "number" || direction !== "asc"} disabled={operation.running} sections={[{ label: "Trier par", value: sortBy, options: sortOptions, onChange: setSortBy }, { label: "Ordre", value: direction, options: directionOptions, onChange: setDirection }]}/></div>
+    </div>
+    <div className="archive-table-wrap">
+      <table className="archive-table">
+        <thead><tr className={`${allVisibleSelected ? "selected" : ""} ${operation.running || !visibleEpisodes.length ? "disabled" : ""}`.trim()} onClick={() => !operation.running && visibleEpisodes.length && toggleVisible()} onKeyDown={(event) => !operation.running && visibleEpisodes.length && activateWithKeyboard(event, toggleVisible)} tabIndex={operation.running || !visibleEpisodes.length ? -1 : 0} aria-label={allVisibleSelected ? "Tout désélectionner" : "Tout sélectionner"}>
+          <th>Numéro</th><th>Titre <span>{allVisibleSelected ? "Tout désélectionner" : selectedVisibleCount ? `${selectedVisibleCount}/${visibleEpisodes.length} sélectionnés` : "Tout sélectionner"}</span></th>
+        </tr></thead>
+        <tbody>{visibleEpisodes.map((episode) => <tr key={episode.uid} className={`${selectedIds.has(episode.uid) ? "selected" : ""} ${operation.running ? "disabled" : ""}`.trim()} onClick={() => !operation.running && toggleEpisode(episode.uid)} onKeyDown={(event) => !operation.running && activateWithKeyboard(event, () => toggleEpisode(episode.uid))} tabIndex={operation.running ? -1 : 0} aria-selected={selectedIds.has(episode.uid)}>
+          <td>{formatEpisodeNumber(episode.number)}</td>
+          <td><strong>{episode.title}</strong><small>{displayType(episode.type)} · {displayDate(episode.date)} · {formatBytes(episode.storageBytes)}{episode.tags?.length ? ` · ${episode.tags.map((item) => `#${item}`).join(" ")}` : ""}</small></td>
+        </tr>)}</tbody>
+      </table>
+      {!visibleEpisodes.length && <Empty title="Aucun épisode" text="Change les filtres."/>}
+    </div>
+    <section className="archive-download-panel">
+      <div><strong>{selectedEpisodes.length} sélectionné{selectedEpisodes.length > 1 ? "s" : ""}</strong><span>{formatBytes(selectedBytes)}</span></div>
+      <label className="archive-delete-toggle"><span><strong>Supprimer après archivage</strong><small>Suppression automatique des épisodes complets après création du ZIP.</small></span><span className="switch"><input type="checkbox" checked={deleteAfterArchive} disabled={operation.running} onChange={(event) => setDeleteAfterArchive(event.target.checked)}/><i/></span></label>
+      {deleteAfterArchive && <p className="archive-danger">Action irréversible. Épisodes incomplets ou en erreur resteront stockés.</p>}
+      <button type="button" className="primary archive-download" onClick={startArchive} disabled={!selectedIds.size || operation.running} aria-busy={operation.running}>{operation.running ? <><span className="button-spinner"/>{operation.current}/{operation.total || "…"} · {operation.message}</> : "Télécharger l’archive"}</button>
+      {operation.message && !operation.running && <p className={operation.errors ? "archive-result error" : "archive-result"} aria-live="polite">{operation.message}</p>}
+      {operation.details.length > 0 && <details className="archive-errors"><summary>{operation.details.length} erreur{operation.details.length > 1 ? "s" : ""}</summary>{operation.details.map((detail, index) => <p key={`${detail}-${index}`}>{detail}</p>)}</details>}
+    </section>
   </section>;
 }
 
@@ -879,7 +1078,7 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
   </section>;
 }
 
-function Admin({ authReady, authenticated, episodes, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onRenumber, onSignIn, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
+function Admin({ authReady, authenticated, episodes, episodesReady, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onForgetEpisode, onRenumber, onSignIn, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
   const [pin, setPin] = useState("");
   const [checkingPin, setCheckingPin] = useState(false);
   const [error, setError] = useState("");
@@ -1231,7 +1430,8 @@ function Admin({ authReady, authenticated, episodes, markdownOpen, onMarkdownOpe
           </div> : <div className="manage-actions"><button type="button" className="edit-action" onClick={() => startEdit(episode)} disabled={deleting || Boolean(loadingEditId)}> {loadingEditId === episode.id ? "Chargement…" : "Modifier"}</button><button type="button" className="delete-action" onClick={() => { setDeleteTargetId(episode.id); setError(""); }} disabled={deleting || Boolean(loadingEditId)}>Supprimer</button></div>}
         </article>)}</div>
         {!managedEpisodes.length && <Empty title="Aucun épisode" text="Change recherche."/>}
-      </section> : tab === "storage" ? <StoragePanel episodes={episodes} status={storageStatus} loading={storageLoading} migrating={migrating} onRefresh={refreshStorage} onMigrate={migrate}/>
+      </section> : tab === "storage" ? <StoragePanel episodes={episodes} episodesReady={episodesReady} status={storageStatus} loading={storageLoading} migrating={migrating} onRefresh={refreshStorage} onMigrate={migrate} onOpenArchive={() => setTab("archive")}/>
+        : tab === "archive" ? <ArchivePanel episodes={episodes} onDelete={onDelete} onForgetEpisode={onForgetEpisode} onRefresh={refreshStorage} onBack={() => setTab("storage")}/>
         : <SettingsPanel
           status={storageStatus}
           busy={settingsBusy}
@@ -1421,6 +1621,8 @@ export default function App() {
   };
   const openAdmin = () => {
     setAdminMarkdownOpen(false);
+    if (!hasFreshData) setSupabaseLoading(true);
+    refreshEpisodesRef.current?.();
     setAdminOpen(true);
   };
   const authenticateAdmin = async (pin) => {
@@ -1465,14 +1667,17 @@ export default function App() {
     setEpisodeDetails((current) => ({ ...current, [savedEpisode.id]: savedEpisode }));
     return savedEpisode;
   };
-  const deleteEpisode = async (episode) => {
-    await removeSupabaseEpisode(episode);
+  const forgetEpisode = (episode) => {
     updateEpisodeList((current) => current.filter((item) => item.uid !== episode.uid));
     setEpisodeDetails((current) => {
       const next = { ...current };
       delete next[episode.id];
       return next;
     });
+  };
+  const deleteEpisode = async (episode) => {
+    await removeSupabaseEpisode(episode);
+    forgetEpisode(episode);
   };
   const renumberEpisodes = async () => {
     const result = await renumberSupabaseEpisodes();
@@ -1535,7 +1740,7 @@ export default function App() {
       <div className="atmosphere" aria-hidden="true"/>
       {!adminMarkdownOpen && <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={adminOpen && adminSession ? logoutAdmin : openAdmin} aria-label={adminOpen && adminSession ? "Déconnexion" : "Espace créateur"}><Icon name="lock" size={16}/> {adminOpen && adminSession ? "Déconnexion" : "Créer"}</button></header>}
       <main>
-        {adminOpen ? <Admin authReady={adminAuthReady} authenticated={Boolean(adminSession)} episodes={fullSorted} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onRenumber={renumberEpisodes} onSignIn={authenticateAdmin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
+        {adminOpen ? <Admin authReady={adminAuthReady} authenticated={Boolean(adminSession)} episodes={fullSorted} episodesReady={hasFreshData} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onForgetEpisode={forgetEpisode} onRenumber={renumberEpisodes} onSignIn={authenticateAdmin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
           : readerView()}
       </main>
       {!adminOpen && <footer><div className="footer-brand"><Icon name="lock" size={14}/> TBA Reader</div><span>© 2026 — Bizave Corp.</span></footer>}

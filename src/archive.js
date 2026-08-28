@@ -141,17 +141,24 @@ async function chooseDirectSave(filename) {
   });
 }
 
-export async function downloadEpisodeArchive({ onProgress = () => {} } = {}) {
+export async function downloadEpisodeArchive({ episodeIds = null, onProgress = () => {} } = {}) {
   const filename = archiveFilename();
   const fileHandle = await chooseDirectSave(filename);
   onProgress({ phase: "loading", current: 0, total: 0, label: "Lecture des épisodes" });
   const episodes = await getEpisodesSnapshot();
-  const sortedEpisodes = [...episodes].sort((a, b) => Number(a.number) - Number(b.number));
+  const selectedIds = Array.isArray(episodeIds) ? new Set(episodeIds.map(String)) : null;
+  const sortedEpisodes = episodes
+    .filter((episode) => !selectedIds || selectedIds.has(episode.uid))
+    .sort((a, b) => Number(a.number) - Number(b.number));
+  if (!sortedEpisodes.length) throw new Error("Aucun épisode sélectionné n’existe encore.");
   const blobWriter = fileHandle ? null : new BlobWriter("application/zip");
   const output = fileHandle ? await fileHandle.createWritable() : blobWriter;
   const zipWriter = new ZipWriter(output, { useWebWorkers: false });
   const entries = [];
   const errors = [];
+  const episodeErrors = [];
+  const completeEpisodeIds = [];
+  const incompleteEpisodeIds = [];
 
   for (let index = 0; index < sortedEpisodes.length; index += 1) {
     const episode = sortedEpisodes[index];
@@ -173,12 +180,16 @@ export async function downloadEpisodeArchive({ onProgress = () => {} } = {}) {
         files[candidate.kind] = candidate.filename;
       } catch (error) {
         missing.push(candidate.kind);
-        errors.push(`TBA ${episodeNumber(episode.number)} — ${episode.title} · ${candidate.kind} : ${error?.message || "échec inconnu"}`);
+        const message = error?.message || "échec inconnu";
+        errors.push(`TBA ${episodeNumber(episode.number)} — ${episode.title} · ${candidate.kind} : ${message}`);
+        episodeErrors.push({ episodeId: episode.uid, kind: candidate.kind, message });
       }
     }
 
     await zipWriter.add(`${folder}/episode.json`, new Blob([JSON.stringify(episodeExport(episode, files), null, 2)], { type: "application/json" }).stream(), { level: 6 });
     entries.push({ episode, folder, files, missing });
+    if (missing.length) incompleteEpisodeIds.push(episode.uid);
+    else completeEpisodeIds.push(episode.uid);
   }
 
   onProgress({ phase: "index", current: sortedEpisodes.length, total: sortedEpisodes.length, label: "Création de l’index" });
@@ -189,5 +200,13 @@ export async function downloadEpisodeArchive({ onProgress = () => {} } = {}) {
   const result = await zipWriter.close();
   if (!fileHandle) downloadBlob(result, filename);
   onProgress({ phase: "done", current: sortedEpisodes.length, total: sortedEpisodes.length, label: "Archive prête" });
-  return { filename, episodes: sortedEpisodes.length, errors };
+  return {
+    filename,
+    episodes: sortedEpisodes.length,
+    errors,
+    episodeErrors,
+    completeEpisodeIds,
+    incompleteEpisodeIds,
+    directSave: Boolean(fileHandle),
+  };
 }
