@@ -53,7 +53,7 @@ function MarkdownListItem({ node, className = "", ...props }) {
   return <li className={`${className} ${taskClass}`.trim()} {...props}/>;
 }
 
-export function MarkdownBody({ children = "" }) {
+export function MarkdownBody({ children = "", corsImages = false }) {
   return <ReactMarkdown
     remarkPlugins={[remarkGfm, remarkAccent, remarkDividers, remarkSubtext]}
     components={{
@@ -66,7 +66,7 @@ export function MarkdownBody({ children = "" }) {
       table: ({ node, ...props }) => <div className="markdown-table-wrap"><table {...props}/></div>,
       li: ({ node, ...props }) => <MarkdownListItem node={node} {...props}/>,
       input: ({ node, type, ...props }) => type === "checkbox" ? null : <input type={type} {...props}/>,
-      img: ({ node, ...props }) => <MarkdownImage {...props}/>,
+      img: ({ node, ...props }) => <MarkdownImage crossOrigin={corsImages ? "anonymous" : undefined} {...props}/>,
       a: ({ node, href = "", ...props }) => /^https?:\/\//i.test(href)
         ? <a href={href} target="_blank" rel="noopener noreferrer" {...props}/>
         : <span className="markdown-link-disabled" {...props}/>,

@@ -19,6 +19,8 @@ Ce document décrit l’architecture actuellement déployée. Il ne doit conteni
 - Les signets restent dans `localStorage` et ne sont pas synchronisés entre appareils.
 - Une clé visuelle `TBA-XXXX-00` peut être chargée depuis **À propos** pour afficher les épisodes associés.
 - La vitrine utilise un cache local léger avec actualisation en arrière-plan des métadonnées publiques.
+- Avec `?aread=true`, un bouton **Lire** peut ouvrir `/lire/<share_id>` et transcrire localement l’audio lorsque Whisper est activé par un administrateur.
+- Le modèle Whisper est distribué par Cloudflare R2 puis conservé dans IndexedDB pendant un mois. L’audio et la transcription ne quittent pas le navigateur.
 
 ### Espace créateur
 
@@ -44,6 +46,7 @@ Le mode Infrastructure permet de :
 - migrer manuellement un épisode complet entre Supabase et R2 ;
 - configurer ou désactiver la migration automatique ;
 - connecter Cloudflare R2 ;
+- installer, publier ou supprimer le modèle Whisper distribué par R2 ;
 - télécharger une archive ZIP locale de tous les épisodes Supabase et R2 ;
 - changer le PIN administrateur.
 
@@ -60,10 +63,12 @@ Entrer dans l’écran Stockage ne déclenche pas une nouvelle lecture. Le bouto
 - **Supabase Auth** : session administrateur persistante et JWT.
 - **Supabase Edge Functions** : validation du rôle Auth et opérations privilégiées R2/stockage.
 - **Cloudflare R2** : stockage secondaire compatible S3.
+- **Whisper.cpp WebAssembly** : transcription locale découpée en blocs.
 - **aws4fetch** : signature côté Edge Function des URL d’envoi direct vers R2.
 - **zip.js** : création progressive de l’archive complète dans le navigateur.
 - **Firebase Hosting** : hébergement du build et réécriture SPA.
 - **localStorage** : cache vitrine, configuration publique R2, signets, corps Markdown récents, clé TBA et limite locale de session admin.
+- **IndexedDB** : modèle Whisper Q5_b et progression locale des transcriptions.
 - **react-markdown** et **remark-gfm** : rendu Markdown.
 
 Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou WebSocket et `public.episodes` a été retirée de la publication `supabase_realtime`.
@@ -92,6 +97,8 @@ Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou Web
 │   ├── archive.js
 │   ├── main.jsx
 │   ├── markdown.js
+│   ├── transcription.js
+│   ├── whisperConfig.js
 │   ├── styles.css
 │   └── supabase.js
 ├── supabase/
@@ -164,10 +171,12 @@ Le manifeste `data` suit cette forme :
 ### Tables de stockage
 
 - `tba_settings` : migration automatique, seuils, quota de référence, configuration privée R2 et état activé/désactivé.
+- `tba_settings` conserve aussi l’état privé d’installation Whisper, sa clé R2 et la dernière erreur de nettoyage.
 - `tba_storage_jobs` : état temporaire des copies Supabase ↔ R2 et reprise de la dernière erreur d’un épisode.
 - `tba_public_storage` : uniquement l’état public minimal de R2 et son URL publique.
+- `tba_public_whisper` : singleton public contenant seulement `whisper_ready` et `whisper_public_url`.
 
-Les tables privées ont RLS activé et aucune politique publique. `tba_public_storage` expose seulement les valeurs nécessaires à la lecture des médias R2.
+Les tables privées ont RLS activé et aucune politique publique. `tba_public_storage` et `tba_public_whisper` exposent uniquement les valeurs nécessaires au frontend.
 
 ---
 
@@ -255,6 +264,24 @@ L’Edge Function :
 
 Ne jamais placer un secret Cloudflare dans React, Firebase Hosting ou ce README.
 
+### Distribution Whisper
+
+Whisper dépend d’un bucket R2 configuré, actif et accessible via son adresse publique `r2.dev`. Le fichier source versionné reste dans Firebase Hosting, sous `/whisper/ggml-base-q5_1.bin`, mais il n’est jamais utilisé directement par les lecteurs.
+
+Lors de l’activation depuis **Infrastructure → Paramètres** :
+
+1. l’accès public Whisper est coupé pendant l’installation ;
+2. le navigateur administrateur télécharge le modèle depuis Firebase ;
+3. sa taille et son SHA-256 fixes sont vérifiés ;
+4. le navigateur l’envoie vers la clé R2 réservée avec une URL PUT temporaire ;
+5. l’Edge Function vérifie l’objet public, puis publie son URL dans `tba_public_whisper`.
+
+La désactivation retire d’abord l’URL publique de la base, puis supprime l’objet R2. Une clé R2 déjà absente est considérée comme correctement nettoyée, ce qui évite tout blocage après une installation interrompue. Une autre erreur de suppression laisse Whisper inaccessible et place l’installation dans l’état `cleanup_required`. R2 ne peut pas être désactivé ou reconfiguré tant que Whisper est installé ou doit être nettoyé.
+
+Avant chaque installation, l’Edge Function réapplique aussi la politique CORS R2 avec l’origine exacte de l’administration, y compris une IP locale HTTPS autorisée. Le navigateur réessaie automatiquement l’upload pendant la propagation éventuelle de la règle CORS.
+
+Le frontend ne consulte `tba_public_whisper` que lorsque le paramètre exact `?aread=true` est présent. Une consultation normale de TBA Reader ne produit donc aucune requête Supabase liée à Whisper. Après autorisation, le modèle est téléchargé exclusivement depuis R2, vérifié de nouveau puis conservé dans IndexedDB. Il n’existe aucun repli utilisateur vers Firebase.
+
 ---
 
 ## Edge Function `tba-admin`
@@ -271,6 +298,10 @@ La fonction accepte uniquement `POST`. Sauf pour l’amorçage unique du compte,
 | `r2-setup` | Créer et connecter le bucket R2. |
 | `r2-custom-domain` | Enregistrer puis activer un domaine personnalisé R2 lorsque son DNS et TLS sont actifs. |
 | `r2-upload-urls` | Produire des URL d’envoi signées et limitées aux objets de l’épisode. |
+| `whisper-install-start` | Masquer Whisper et préparer l’envoi temporaire du modèle vers R2. |
+| `whisper-install-finish` | Vérifier l’objet R2 et publier son URL. |
+| `whisper-install-cancel` | Annuler une installation et nettoyer son objet R2. |
+| `whisper-disable` | Couper l’accès public et supprimer le modèle R2. |
 | `save` | Valider et enregistrer un épisode. |
 | `migration-start` | Préparer ou reprendre une migration. |
 | `migration-finish` | Vérifier, basculer le fournisseur et nettoyer la source. |
@@ -347,6 +378,7 @@ Le cache vitrine ne contient pas les droits créateur. Les signets, la clé TBA 
 | Signets | `/signets` |
 | À propos | `/informations` |
 | Épisode | `/tba/<share_id>` |
+| Transcription locale | `/lire/<share_id>?aread=true` |
 
 Firebase réécrit toutes les routes vers `index.html`.
 
@@ -359,8 +391,11 @@ npm ci
 npm run dev -- --host 0.0.0.0 --port 5174
 ```
 
-- Utiliser `http://localhost:5174` sur le poste qui exécute Vite pour tester le hachage des clés TBA.
-- L’adresse réseau permet les tests depuis téléphone et tablette, sauf les API exigeant HTTPS comme `crypto.subtle`.
+- Vite utilise automatiquement `.cert/tba-local.crt` et `.cert/tba-local.key` lorsqu’ils existent.
+- Utiliser `https://localhost:5174` sur le poste qui exécute Vite.
+- Pour le réseau local actuel : `https://192.168.1.188:5174`.
+- Installer `.cert/tba-local-ca.cer` comme autorité racine de confiance sur chaque appareil de test afin d’éviter l’avertissement TLS et d’activer toutes les API de contexte sécurisé.
+- Le dossier `.cert/`, les clés privées et les certificats locaux ne sont jamais versionnés. Régénérer le certificat si l’adresse IP locale change.
 - Respecter systématiquement les procédures Vite de [`AGENTS.md`](./AGENTS.md).
 - Pour rattacher le projet à une nouvelle infrastructure complète, suivre [`clone.md`](./clone.md).
 
@@ -404,6 +439,8 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - Une route d’épisode survit au rechargement direct.
 - Markdown, images, audio et YouTube fonctionnent sur téléphone et ordinateur.
 - Une clé TBA se charge sur HTTPS et affiche les épisodes associés.
+- Sans `?aread=true`, aucun bouton ni requête Supabase Whisper n’existe.
+- Avec le flag et Whisper actif, **Lire** reste grisé jusqu’au premier lancement de l’audio, puis la transcription s’affiche entre le média et le Markdown.
 
 ### Administration
 
@@ -422,6 +459,8 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - La migration automatique est désactivée sur une nouvelle configuration.
 - Les seuils 75 % et 60 % sont appliqués.
 - R2 est inaccessible tant que sa configuration n’est pas validée.
+- Whisper ne peut être activé que lorsque R2 est configuré et actif.
+- L’activation copie le modèle Firebase vérifié vers R2 ; la désactivation retire son accès public et son objet R2.
 - Aucun canal ou WebSocket Realtime n’est ouvert.
 - Une archive contient l’index hors ligne, les métadonnées, le Markdown et les médias disponibles des deux fournisseurs.
 - La création d’une archive n’envoie aucune écriture et ne supprime aucun objet.
@@ -444,6 +483,7 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - La migration navigateur exige que l’administration reste ouverte pendant la copie.
 - Aucun Cron ne lance une migration lorsque personne n’utilise l’application.
 - Les signets et caches ne sont pas synchronisés entre appareils.
+- Une transcription interrompue reste uniquement dans l’IndexedDB de l’appareil ; **Relire** efface cette progression avant de recommencer.
 - Les métadonnées Open Graph restent statiques pour tout le site.
 - Le retour vers Supabase est impossible si un objet dépasse 50 Mo.
 - Le repli Blob de l’archive peut utiliser beaucoup de mémoire sur mobile pour une bibliothèque volumineuse.

@@ -3,6 +3,10 @@ import { AwsClient } from "npm:aws4fetch@1.0.20";
 
 const SUPABASE_BUCKET = "tba-media";
 const MAX_SUPABASE_FILE_BYTES = 50_000_000;
+const WHISPER_MODEL_KEY = "whisper/ggml-base-q5_1-v1.bin";
+const WHISPER_MODEL_BYTES = 59_707_625;
+const WHISPER_MODEL_SHA256 = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898";
+const WHISPER_SOURCE_PATH = "/whisper/ggml-base-q5_1.bin";
 const ADMIN_USER_KEY = "tba-admin@bizave.local";
 const technicalIdPattern = /^[a-zA-Z0-9-]{3,64}$/;
 const shareIdPattern = /^[a-z0-9]{8}$/;
@@ -231,7 +235,9 @@ async function cloudflareFetch(accountId: string, token: string, path: string, i
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.success === false) {
     const message = data.errors?.[0]?.message || `Cloudflare a répondu ${response.status}.`;
-    throw new Error(message);
+    const error = new Error(message) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
   return data.result;
 }
@@ -320,6 +326,27 @@ async function verifyR2(supabase: AdminClient, items: MediaItem[]) {
   }));
 }
 
+function r2CorsOrigins(origin: string) {
+  return [...new Set([
+    origin === "*" ? "" : origin,
+    "https://tbizave-reader.web.app",
+    "https://tbizave-reader.firebaseapp.com",
+    "https://bizave.kabomane.me",
+  ].filter(Boolean))];
+}
+
+async function configureR2Cors(accountId: string, token: string, bucket: string, origin: string) {
+  await cloudflareFetch(accountId, token, `/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}/cors`, {
+    method: "PUT",
+    body: JSON.stringify({ rules: [{
+      id: "tba-reader",
+      allowed: { methods: ["GET", "PUT", "HEAD", "DELETE"], origins: r2CorsOrigins(origin), headers: ["*"] },
+      exposeHeaders: ["etag", "content-length"],
+      maxAgeSeconds: 3600,
+    }] }),
+  });
+}
+
 async function supabaseObjectInfo(supabase: AdminClient, keys: string[]) {
   const { data, error } = await supabase.rpc("tba_object_info", { object_keys: keys });
   if (error) throw error;
@@ -361,8 +388,42 @@ async function deleteObjects(supabase: AdminClient, provider: Provider, keys: st
   }
 }
 
+function isMissingR2Object(error: unknown) {
+  const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 0;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return status === 404 || /specified key does not exist|no such key|nosuchkey|object not found/i.test(message);
+}
+
+async function deleteWhisperObject(supabase: AdminClient, key: string) {
+  try {
+    await deleteR2Objects(supabase, [key]);
+  } catch (error) {
+    if (!isMissingR2Object(error)) throw error;
+  }
+}
+
+async function publishWhisper(supabase: AdminClient, ready: boolean, modelUrl: string | null = null) {
+  const { error } = await supabase.from("tba_public_whisper").update({
+    whisper_ready: ready,
+    whisper_public_url: ready ? modelUrl : null,
+  }).eq("id", true);
+  if (error) throw error;
+}
+
+async function updateWhisperState(supabase: AdminClient, values: Record<string, unknown>) {
+  const { error } = await supabase.from("tba_settings").update({
+    ...values,
+    updated_at: new Date().toISOString(),
+  }).eq("id", true);
+  if (error) throw error;
+}
+
+function whisperLocksR2(config: Record<string, unknown>) {
+  return ["installing", "active", "cleanup_required"].includes(String(config.whisper_status));
+}
+
 async function storageStatus(supabase: AdminClient) {
-  const [config, usageResult, orphanResult, episodesResult, jobsResult] = await Promise.all([
+  const [config, usageResult, orphanResult, episodesResult, jobsResult, whisperResult] = await Promise.all([
     settings(supabase),
     supabase.rpc("tba_storage_bytes"),
     supabase.rpc("tba_orphan_stats"),
@@ -371,11 +432,13 @@ async function storageStatus(supabase: AdminClient) {
       .select("id,episode_id,source_provider,target_provider,status,manifest,error,updated_at")
       .in("status", ["queued", "copying", "verifying", "committing", "cleanup", "error"])
       .order("created_at", { ascending: false }),
+    supabase.from("tba_public_whisper").select("whisper_ready").eq("id", true).single(),
   ]);
   if (usageResult.error) throw usageResult.error;
   if (orphanResult.error) throw orphanResult.error;
   if (episodesResult.error) throw episodesResult.error;
   if (jobsResult.error) throw jobsResult.error;
+  if (whisperResult.error) throw whisperResult.error;
   const r2Bytes = (episodesResult.data ?? [])
     .filter((episode) => episode.storage_provider === "r2")
     .reduce((sum, episode) => sum + Number(episode.storage_bytes || 0), 0);
@@ -389,6 +452,11 @@ async function storageStatus(supabase: AdminClient) {
       r2Enabled: config.r2_enabled,
       r2Bucket: config.r2_bucket,
       r2PublicUrl: config.r2_public_url,
+      whisperStatus: config.whisper_status,
+      whisperReady: Boolean(whisperResult.data?.whisper_ready),
+      whisperModelKey: config.whisper_model_key,
+      whisperError: config.whisper_error,
+      whisperInstalledAt: config.whisper_installed_at,
     },
     supabaseBytes: Number(usageResult.data ?? 0),
     r2Bytes,
@@ -462,13 +530,17 @@ Deno.serve(async (req) => {
 
     if (payload.action === "r2-toggle") {
       const enabled = Boolean(payload.enabled);
+      const config = await settings(supabase);
+      if (!enabled && whisperLocksR2(config)) {
+        return json(req, { error: "Désactive Whisper avant de désactiver Cloudflare R2." }, 409);
+      }
       if (enabled) {
-        const { config, token } = await r2Context(supabase);
-        await cloudflareFetch(config.r2_account_id, token, `/accounts/${config.r2_account_id}/tokens/verify`);
+        const { config: r2Config, token } = await r2Context(supabase);
+        await cloudflareFetch(r2Config.r2_account_id, token, `/accounts/${r2Config.r2_account_id}/tokens/verify`);
         await cloudflareFetch(
-          config.r2_account_id,
+          r2Config.r2_account_id,
           token,
-          `/accounts/${config.r2_account_id}/r2/buckets/${encodeURIComponent(config.r2_bucket)}`,
+          `/accounts/${r2Config.r2_account_id}/r2/buckets/${encodeURIComponent(r2Config.r2_bucket)}`,
         );
       }
       const { error } = await supabase.from("tba_settings").update({
@@ -480,6 +552,9 @@ Deno.serve(async (req) => {
     }
 
     if (payload.action === "r2-custom-domain") {
+      if (whisperLocksR2(await settings(supabase))) {
+        return json(req, { error: "Désactive Whisper avant de modifier l’adresse publique R2." }, 409);
+      }
       const domain = String(payload.domain ?? "").trim().toLowerCase();
       const zoneId = String(payload.zoneId ?? "").trim().toLowerCase();
       if (!hostnamePattern.test(domain) || !cloudflareZoneIdPattern.test(zoneId)) {
@@ -497,6 +572,9 @@ Deno.serve(async (req) => {
     }
 
     if (payload.action === "r2-setup") {
+      if (whisperLocksR2(await settings(supabase))) {
+        return json(req, { error: "Désactive Whisper avant de reconfigurer Cloudflare R2." }, 409);
+      }
       const accountId = String(payload.accountId ?? "").trim();
       const token = String(payload.apiToken ?? "").trim();
       const parentAccessKeyId = String(payload.parentAccessKeyId ?? "").trim();
@@ -518,21 +596,7 @@ Deno.serve(async (req) => {
       }
 
       const origin = allowedOrigin(req.headers.get("origin") ?? "");
-      const corsOrigins = [...new Set([
-        origin,
-        "https://tbizave-reader.web.app",
-        "https://tbizave-reader.firebaseapp.com",
-        "https://bizave.kabomane.me",
-      ])];
-      await cloudflareFetch(accountId, token, `/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}/cors`, {
-        method: "PUT",
-        body: JSON.stringify({ rules: [{
-          id: "tba-reader",
-          allowed: { methods: ["GET", "PUT", "HEAD", "DELETE"], origins: corsOrigins, headers: ["*"] },
-          exposeHeaders: ["etag", "content-length"],
-          maxAgeSeconds: 3600,
-        }] }),
-      });
+      await configureR2Cors(accountId, token, bucket, origin);
       await cloudflareFetch(accountId, token, `/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}/domains/managed`, {
         method: "PUT",
         body: JSON.stringify({ enabled: true }),
@@ -555,6 +619,78 @@ Deno.serve(async (req) => {
       }).eq("id", true);
       if (publicConfigError) throw publicConfigError;
       return json(req, { ok: true, bucket, publicUrl });
+    }
+
+    if (payload.action === "whisper-install-start") {
+      const config = await settings(supabase);
+      if (!config.r2_ready || !config.r2_enabled) {
+        return json(req, { error: "Cloudflare R2 doit être configuré et activé." }, 409);
+      }
+      await publishWhisper(supabase, false);
+      await updateWhisperState(supabase, {
+        whisper_status: "installing",
+        whisper_model_key: WHISPER_MODEL_KEY,
+        whisper_error: null,
+        whisper_installed_at: null,
+      });
+      const { token } = await r2WriteContext(supabase);
+      await configureR2Cors(
+        config.r2_account_id,
+        token,
+        config.r2_bucket,
+        allowedOrigin(req.headers.get("origin") ?? ""),
+      );
+      const signing = await r2UploadUrls(supabase, [WHISPER_MODEL_KEY]);
+      const sourceOrigin = allowedOrigin(req.headers.get("origin") ?? "");
+      return json(req, {
+        ok: true,
+        sourceUrl: `${sourceOrigin}${WHISPER_SOURCE_PATH}`,
+        uploadUrl: signing.objects[0]?.url,
+        key: WHISPER_MODEL_KEY,
+        expectedBytes: WHISPER_MODEL_BYTES,
+        expectedSha256: WHISPER_MODEL_SHA256,
+      });
+    }
+
+    if (payload.action === "whisper-install-finish") {
+      const config = await settings(supabase);
+      if (config.whisper_status !== "installing" || config.whisper_model_key !== WHISPER_MODEL_KEY) {
+        return json(req, { error: "Installation Whisper absente ou expirée." }, 409);
+      }
+      await verifyR2(supabase, [{ key: WHISPER_MODEL_KEY, size: WHISPER_MODEL_BYTES, mime: "application/octet-stream" }]);
+      const modelUrl = `${config.r2_public_url}/${encodeObjectKey(WHISPER_MODEL_KEY)}`;
+      await updateWhisperState(supabase, {
+        whisper_status: "active",
+        whisper_model_key: WHISPER_MODEL_KEY,
+        whisper_error: null,
+        whisper_installed_at: new Date().toISOString(),
+      });
+      await publishWhisper(supabase, true, modelUrl);
+      return json(req, { ok: true, modelUrl });
+    }
+
+    if (payload.action === "whisper-install-cancel" || payload.action === "whisper-disable") {
+      await publishWhisper(supabase, false);
+      const config = await settings(supabase);
+      const key = config.whisper_model_key === WHISPER_MODEL_KEY ? WHISPER_MODEL_KEY : null;
+      try {
+        if (key) await deleteWhisperObject(supabase, key);
+        await updateWhisperState(supabase, {
+          whisper_status: "disabled",
+          whisper_model_key: null,
+          whisper_error: null,
+          whisper_installed_at: null,
+        });
+        return json(req, { ok: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Suppression R2 impossible.";
+        await updateWhisperState(supabase, {
+          whisper_status: "cleanup_required",
+          whisper_model_key: key,
+          whisper_error: message,
+        });
+        return json(req, { error: `Whisper est désactivé, mais son fichier R2 n’a pas pu être supprimé : ${message}` }, 500);
+      }
     }
 
     if (payload.action === "r2-upload-urls") {

@@ -7,6 +7,52 @@
       "**/.*",
       "**/node_modules/**"
     ],
+    "headers": [
+      {
+        "source": "/lire/**",
+        "headers": [
+          {
+            "key": "Cross-Origin-Opener-Policy",
+            "value": "same-origin"
+          },
+          {
+            "key": "Cross-Origin-Embedder-Policy",
+            "value": "require-corp"
+          }
+        ]
+      },
+      {
+        "source": "/whisper/**",
+        "headers": [
+          {
+            "key": "Cross-Origin-Embedder-Policy",
+            "value": "require-corp"
+          },
+          {
+            "key": "Cross-Origin-Resource-Policy",
+            "value": "same-origin"
+          }
+        ]
+      },
+      {
+        "source": "/whisper/ggml-base-q5_1.bin",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=2592000,immutable"
+          }
+        ]
+      },
+      {
+        "source": "/whisper/model-manifest.json",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      }
+    ],
     "rewrites": [
       {
         "source": "**",

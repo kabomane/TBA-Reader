@@ -11,10 +11,12 @@ import {
 } from "./accessKey.js";
 import { MarkdownBody } from "./MarkdownBody.jsx";
 import { validateAudioFile } from "./media.js";
+import { hasCachedWhisperModel, useLocalTranscription } from "./transcription.js";
 import {
   EPISODE_REFRESH_INTERVAL_MS,
   changeAdminPin,
   getAdminSession,
+  getPublicWhisperConfig,
   getStorageStatus,
   loadEpisodeDetails as loadSupabaseEpisodeDetails,
   migrateEpisodeStorage,
@@ -26,11 +28,13 @@ import {
   signOutAdmin,
   setupR2,
   toggleR2,
+  toggleWhisperDistribution,
   watchAdminSession,
   watchEpisodes,
 } from "./supabase.js";
 
 const BOOKMARKS_KEY = "tba-bookmarks-v1";
+const READER_SCROLL_KEY = "tba-reader-scroll-v1";
 const R2_INCLUDED_BYTES = 10_000_000_000;
 const MAX_SUPABASE_FILE_BYTES = 50_000_000;
 const SHOWCASE_CACHE_KEY = "tba-showcase-cache-v1";
@@ -210,16 +214,20 @@ function makeUuid() {
 
 function readRoute() {
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const readerMatch = path.match(/^\/lire\/([^/]+)$/);
+  if (readerMatch) {
+    return { view: "episode", episodeId: decodeURIComponent(readerMatch[1]), tag: "", readMode: true };
+  }
   const episodeMatch = path.match(/^\/tba\/([^/]+)$/);
   if (episodeMatch) {
-    return { view: "episode", episodeId: decodeURIComponent(episodeMatch[1]), tag: "" };
+    return { view: "episode", episodeId: decodeURIComponent(episodeMatch[1]), tag: "", readMode: false };
   }
   if (path === "/listes") {
-    return { view: "archive", episodeId: "", tag: new URLSearchParams(window.location.search).get("sujet") || "" };
+    return { view: "archive", episodeId: "", tag: new URLSearchParams(window.location.search).get("sujet") || "", readMode: false };
   }
-  if (path === "/signets") return { view: "bookmarks", episodeId: "", tag: "" };
-  if (path === "/informations") return { view: "about", episodeId: "", tag: "" };
-  return { view: "home", episodeId: "", tag: "" };
+  if (path === "/signets") return { view: "bookmarks", episodeId: "", tag: "", readMode: false };
+  if (path === "/informations") return { view: "about", episodeId: "", tag: "", readMode: false };
+  return { view: "home", episodeId: "", tag: "", readMode: false };
 }
 
 function routeUrl(view, episodeId = "", tag = "") {
@@ -230,9 +238,10 @@ function routeUrl(view, episodeId = "", tag = "") {
   return "/";
 }
 
-function Poster({ episode, large = false }) {
+function Poster({ episode, large = false, cors = false }) {
   return (
-    <div className={`poster palette-${episode.palette % 6} ${large ? "poster-large" : ""}`} style={episode.image ? { backgroundImage: `url(${episode.image})` } : undefined}>
+    <div className={`poster palette-${episode.palette % 6} ${large ? "poster-large" : ""}`} style={episode.image && !cors ? { backgroundImage: `url(${episode.image})` } : undefined}>
+      {episode.image && cors && <img className="poster-image" src={episode.image} alt="" crossOrigin="anonymous"/>}
       {!episode.image && <><div className="poster-grid"/><i className="orbit orbit-a"/><i className="orbit orbit-b"/></>}
       <span className="poster-code">{formatEpisodeNumber(episode.number)}</span>
       <span className="poster-word">BIZARRE</span>
@@ -477,7 +486,7 @@ function Archive({ episodes, allTags, tag, setTag, onOpen, bookmarks, onToggleBo
   );
 }
 
-function AudioPlayer({ src }) {
+function AudioPlayer({ src, readControl = null, cors = false, onReadyChange = null }) {
   const audio = useRef(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -485,6 +494,12 @@ function AudioPlayer({ src }) {
   const [duration, setDuration] = useState(0);
   const [rate, setRate] = useState(1);
   const [audioError, setAudioError] = useState("");
+  const [canRead, setCanRead] = useState(false);
+  useEffect(() => {
+    setDuration(0);
+    setCanRead(false);
+    onReadyChange?.(false);
+  }, [onReadyChange, src]);
   const toggle = async () => {
     if (!audio.current) return;
     if (playing) audio.current.pause();
@@ -510,7 +525,7 @@ function AudioPlayer({ src }) {
   return (
     <div className="audio-block">
       <div className="audio-player">
-        <audio ref={audio} src={src} preload="none" onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onError={() => setAudioError("Ce fichier audio n’est pas compatible avec ce navigateur. Réencode-le en MP3, AAC ou M4A AAC.")} onEnded={(event) => { setPlaying(false); syncAudioTime(event.currentTarget); }} onLoadedMetadata={(event) => syncAudioTime(event.currentTarget)} onDurationChange={(event) => syncAudioTime(event.currentTarget)} onTimeUpdate={(event) => syncAudioTime(event.currentTarget)}/>
+        <audio ref={audio} src={src} crossOrigin={cors ? "anonymous" : undefined} preload="metadata" onLoadStart={() => { setCanRead(false); onReadyChange?.(false); }} onPlay={() => { setPlaying(true); setCanRead(true); onReadyChange?.(true); }} onPause={() => setPlaying(false)} onError={() => { setCanRead(false); onReadyChange?.(false); setAudioError("Ce fichier audio n’est pas compatible avec ce navigateur. Réencode-le en MP3, AAC ou M4A AAC."); }} onEnded={(event) => { setPlaying(false); syncAudioTime(event.currentTarget); }} onLoadedMetadata={(event) => syncAudioTime(event.currentTarget)} onDurationChange={(event) => syncAudioTime(event.currentTarget)} onTimeUpdate={(event) => syncAudioTime(event.currentTarget)}/>
         <button onClick={toggle} aria-label={playing ? "Pause" : "Lecture"}><Icon name={playing ? "pause" : "play"}/></button>
         <div className="audio-line" onClick={(event) => { if (!audio.current || !Number.isFinite(audio.current.duration)) return; const rect = event.currentTarget.getBoundingClientRect(); audio.current.currentTime = ((event.clientX - rect.left) / rect.width) * audio.current.duration; syncAudioTime(audio.current); }}><i style={{ width: `${progress}%` }}/></div>
         <span className="audio-time">{formatAudioTime(currentTime)} / {formatAudioTime(duration)}</span>
@@ -518,19 +533,69 @@ function AudioPlayer({ src }) {
       {audioError && <p className="form-error" role="alert">{audioError}</p>}
       <div className="audio-speeds" aria-label="Vitesse de lecture">
         {[1, 1.5, 2].map((speed) => <button type="button" className={rate === speed ? "active" : ""} onClick={() => changeRate(speed)} aria-pressed={rate === speed} key={speed}>x{String(speed).replace(".", ",")}</button>)}
+        {readControl && <button type="button" className={`audio-read ${readControl.busy ? "is-busy" : ""}`} onClick={readControl.onClick} disabled={!canRead} aria-label={!canRead ? `${readControl.label} — lancez d’abord l’audio` : readControl.busy ? "Arrêter la transcription" : readControl.label} aria-busy={readControl.busy}>{readControl.label}{readControl.busy && <span className="transcription-spinner"/>}</button>}
       </div>
     </div>
   );
 }
 
-function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark }) {
+function TranscriptionPanel({ transcription }) {
+  const [expanded, setExpanded] = useState(true);
+  return <details className={`transcription-panel ${transcription.error ? "has-error" : ""}`} open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+    <summary><span>Transcription</span><small>{transcription.label}</small><Icon name="chevron" size={16}/></summary>
+    <div className="transcription-content" role="log" aria-live="polite">
+      {transcription.blocks.length ? transcription.blocks.join("\n\n") : !transcription.error && <span>{transcription.emptyText}</span>}
+      {transcription.error && <span className="transcription-error" role="alert">{transcription.error}</span>}
+    </div>
+  </details>;
+}
+
+function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark, readEnabled = false, readMode = false, whisperModelUrl = "" }) {
   const video = youtubeId(episode.youtube);
   const hasBody = Boolean(episode.body?.trim());
   const hasContent = Boolean(video || episode.audio || hasBody);
+  const [audioReady, setAudioReady] = useState(false);
+  const transcription = useLocalTranscription(episode, readMode && readEnabled && audioReady, whisperModelUrl);
+  useEffect(() => {
+    if (!readMode) return undefined;
+    const key = `${READER_SCROLL_KEY}:${episode.id}`;
+    let stored = null;
+    try {
+      stored = window.sessionStorage.getItem(key);
+      window.sessionStorage.removeItem(key);
+    } catch {
+      return undefined;
+    }
+    const scrollTop = Number(stored);
+    if (stored === null || !Number.isFinite(scrollTop)) return undefined;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => window.scrollTo({ top: scrollTop, behavior: "auto" }));
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [episode.id, readMode]);
+  const openReader = () => {
+    try {
+      window.sessionStorage.setItem(`${READER_SCROLL_KEY}:${episode.id}`, String(window.scrollY));
+    } catch {
+      // La navigation reste fonctionnelle lorsque sessionStorage est indisponible.
+    }
+    window.location.assign(`/lire/${encodeURIComponent(episode.id)}?aread=true`);
+  };
+  const readControl = readEnabled && episode.audio ? {
+    label: readMode ? transcription.buttonLabel : "Lire",
+    busy: readMode && transcription.busy,
+    onClick: readMode
+      ? (transcription.busy ? transcription.stop : transcription.start)
+      : openReader,
+  } : null;
   return (
     <article className="episode-page">
       <button className="back" onClick={onBack}><Icon name="back"/> Retour</button>
-      <div className="episode-hero"><div className="episode-visual"><Poster episode={episode} large/><BookmarkButton active={bookmarked} onToggle={() => onToggleBookmark(episode.id)}/></div><div>
+      <div className="episode-hero"><div className="episode-visual"><Poster episode={episode} large cors={readMode}/><BookmarkButton active={bookmarked} onToggle={() => onToggleBookmark(episode.id)}/></div><div>
         <p className="eyebrow">TBA — {formatEpisodeNumber(episode.number)}</p>
         <h1>{episode.title}</h1>
         <p className="lead">{episode.description}</p>
@@ -540,8 +605,9 @@ function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark }) {
       {hasContent && <div className="episode-body">
         <div className="content-divider" aria-hidden="true"><span>Contenu</span><i/></div>
         {video && <div className="video"><iframe src={`https://www.youtube-nocookie.com/embed/${video}`} title={episode.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen/></div>}
-        {episode.audio && <AudioPlayer src={episode.audio}/>}
-        {hasBody && <div className="prose"><MarkdownBody>{episode.body}</MarkdownBody></div>}
+        {episode.audio && <AudioPlayer src={episode.audio} readControl={readControl} cors={readMode} onReadyChange={setAudioReady}/>}
+        {readMode && readEnabled && episode.audio && <TranscriptionPanel transcription={transcription}/>}
+        {hasBody && <div className="prose"><MarkdownBody corsImages={readMode}>{episode.body}</MarkdownBody></div>}
       </div>}
     </article>
   );
@@ -680,7 +746,13 @@ function AccessKeyModule({ accessToken, onAccessTokenChange }) {
   </div>;
 }
 
-function About({ accessToken, onAccessTokenChange }) {
+function About({ accessToken, onAccessTokenChange, onClearLocalCache }) {
+  const [whisperCached, setWhisperCached] = useState(false);
+  useEffect(() => {
+    let active = true;
+    hasCachedWhisperModel().then((cached) => { if (active) setWhisperCached(cached); });
+    return () => { active = false; };
+  }, []);
   return <section className="about">
     <header className="about-heading">
       <p className="eyebrow">À propos</p>
@@ -704,7 +776,8 @@ function About({ accessToken, onAccessTokenChange }) {
         <span><strong>Supabase</strong> PostgreSQL · Storage médias et Markdown · Edge Functions</span>
         <span><strong>Cloudflare R2</strong> Stockage hybride des épisodes</span>
         <span><strong>Firebase Hosting</strong> Déploiement web</span>
-        <span><strong>localStorage</strong> Cache vitrine · Signets</span>
+        <button type="button" onClick={onClearLocalCache} aria-label="Effacer le cache vitrine et les signets"><strong>localStorage</strong> Cache vitrine · Signets</button>
+        <span className={`whisper-cache-pill ${whisperCached ? "is-cached" : ""}`}><strong>indexDB</strong> Whisper Q5_b</span>
       </div>
     </section>
   </section>;
@@ -1035,7 +1108,7 @@ function ArchivePanel({ episodes, onDelete, onForgetEpisode, onRefresh, onBack }
   </section>;
 }
 
-function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePin }) {
+function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onToggleWhisper, onChangePin }) {
   const [autoMigrationEnabled, setAutoMigrationEnabled] = useState(false);
   const [triggerPercent, setTriggerPercent] = useState(75);
   const [targetPercent, setTargetPercent] = useState(60);
@@ -1044,6 +1117,7 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
   const [confirmPin, setConfirmPin] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [whisperProgress, setWhisperProgress] = useState(null);
   useEffect(() => {
     if (!status?.settings) return;
     setAutoMigrationEnabled(Boolean(status.settings.autoMigrationEnabled));
@@ -1053,6 +1127,25 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
   }, [status]);
   const run = async (task, success) => {
     try { setError(""); setMessage(""); await task(); setMessage(success); } catch (actionError) { setError(actionError?.message || "Action impossible."); }
+  };
+  const whisperStatus = status?.settings?.whisperStatus || "disabled";
+  const whisperChecked = Boolean(whisperProgress) || ["installing", "active", "cleanup_required"].includes(whisperStatus);
+  const whisperAvailable = Boolean(status?.settings?.r2Ready && status?.settings?.r2Enabled);
+  const whisperPhase = whisperProgress?.phase === "download" ? "Téléchargement Firebase"
+    : whisperProgress?.phase === "verify" ? "Vérification"
+      : whisperProgress?.phase === "upload" ? "Envoi vers R2"
+        : whisperProgress?.phase === "publish" ? "Publication"
+          : "Préparation";
+  const whisperLabel = whisperProgress ? whisperPhase
+    : whisperStatus === "active" ? "Actif"
+      : whisperStatus === "cleanup_required" ? "Nettoyage requis"
+        : whisperStatus === "installing" ? "Installation"
+          : whisperAvailable ? "Prêt" : "R2 requis";
+  const changeWhisper = async (enabled) => {
+    await run(async () => {
+      setWhisperProgress(enabled ? { phase: "prepare", progress: 0 } : null);
+      try { await onToggleWhisper(enabled, setWhisperProgress); } finally { setWhisperProgress(null); }
+    }, enabled ? "Whisper est distribué depuis R2." : "Whisper désactivé et supprimé de R2.");
   };
   return <section className="settings-panel">
     <header className="manage-heading"><div><p className="eyebrow">Configuration</p><h2>Paramètres</h2></div></header>
@@ -1071,6 +1164,13 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSetupR2(cloudflare), "Cloudflare R2 est prêt.")}>{status?.settings?.r2Ready ? "Tester et reconfigurer" : "Créer et connecter R2"}</button>
     </section>
     <section className="settings-card">
+      <div className="settings-card-heading"><div><span>Transcription locale</span><h3>Whisper Q5_b</h3></div><div className="settings-card-controls"><em className={status?.settings?.whisperReady ? "ready" : ""}>{whisperLabel}</em><label className="switch"><input type="checkbox" aria-label="Activer Whisper" checked={whisperChecked} disabled={busy || (!whisperAvailable && !whisperChecked)} onChange={(event) => changeWhisper(event.target.checked)}/><i/></label></div></div>
+      <p>Installe le modèle Firebase vérifié dans R2. Les lecteurs le téléchargent ensuite uniquement depuis r2.dev.</p>
+      {whisperProgress && <div className="whisper-install-progress" role="status"><span>{whisperPhase}{whisperProgress.progress > 0 ? ` · ${Math.round(whisperProgress.progress * 100)} %` : "…"}</span><i><b style={{ width: `${Math.max(3, whisperProgress.progress * 100)}%` }}/></i></div>}
+      {status?.settings?.whisperError && <p className="form-error">{status.settings.whisperError}</p>}
+      <small>Modèle fixe · 59,7 Mo · cache navigateur mensuel</small>
+    </section>
+    <section className="settings-card">
       <div className="settings-card-heading"><div><span>Sécurité</span><h3>Changer le PIN</h3></div></div>
       <div className="settings-grid"><label><span>Nouveau PIN</span><input type="password" inputMode="numeric" maxLength="6" value={nextPin} onChange={(event) => setNextPin(event.target.value.replace(/\D/g, "").slice(0, 6))}/></label><label><span>Confirmation</span><input type="password" inputMode="numeric" maxLength="6" value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, "").slice(0, 6))}/></label></div>
       <button className="settings-primary" type="button" disabled={busy || nextPin.length !== 6 || nextPin !== confirmPin} onClick={() => run(async () => { await onChangePin(nextPin); setNextPin(""); setConfirmPin(""); }, "PIN modifié. Il sera demandé à la prochaine connexion.")}>Modifier le PIN</button>
@@ -1078,7 +1178,7 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onChangePi
   </section>;
 }
 
-function Admin({ authReady, authenticated, episodes, episodesReady, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onForgetEpisode, onRenumber, onSignIn, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onChangePin, onMigrate, onClose }) {
+function Admin({ authReady, authenticated, episodes, episodesReady, markdownOpen, onMarkdownOpenChange, onSave, onDelete, onForgetEpisode, onRenumber, onSignIn, onLoadEpisode, onGetStorageStatus, onSaveStorageSettings, onSetupR2, onToggleR2, onToggleWhisper, onChangePin, onMigrate, onClose }) {
   const [pin, setPin] = useState("");
   const [checkingPin, setCheckingPin] = useState(false);
   const [error, setError] = useState("");
@@ -1438,6 +1538,7 @@ function Admin({ authReady, authenticated, episodes, episodesReady, markdownOpen
           onSave={async (nextSettings) => { setSettingsBusy(true); try { await onSaveStorageSettings(nextSettings); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onSetupR2={async (config) => { setSettingsBusy(true); try { await onSetupR2(config); await refreshStorage(); } finally { setSettingsBusy(false); } }}
           onToggleR2={async (enabled) => { setSettingsBusy(true); try { await onToggleR2(enabled); await refreshStorage(); } finally { setSettingsBusy(false); } }}
+          onToggleWhisper={async (enabled, onProgress) => { setSettingsBusy(true); try { return await onToggleWhisper(enabled, onProgress); } finally { await refreshStorage(); setSettingsBusy(false); } }}
           onChangePin={async (nextPin) => { setSettingsBusy(true); try { await onChangePin(nextPin); } finally { setSettingsBusy(false); } }}
         />}
     </div>
@@ -1458,8 +1559,11 @@ export default function App() {
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  const readRequested = new URLSearchParams(window.location.search).get("aread") === "true";
+  const [whisperPublicConfig, setWhisperPublicConfig] = useState({ whisperEnabled: false, modelUrl: "" });
   const [view, setView] = useState(initialRoute.current.view);
   const [selectedId, setSelectedId] = useState(initialRoute.current.episodeId);
+  const [readMode, setReadMode] = useState(initialRoute.current.readMode);
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminMarkdownOpen, setAdminMarkdownOpen] = useState(false);
   const [adminSession, setAdminSession] = useState(null);
@@ -1484,6 +1588,17 @@ export default function App() {
   const selected = selectedSummary ? episodeDetails[selectedId] || selectedSummary : null;
   const allTags = useMemo(() => [...new Set(sorted.flatMap((episode) => episode.tags))].sort(), [sorted]);
   const bookmarkedEpisodes = useMemo(() => sorted.filter((episode) => bookmarks.has(episode.id)), [sorted, bookmarks]);
+  useEffect(() => {
+    if (!readRequested) {
+      setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "" });
+      return undefined;
+    }
+    let active = true;
+    getPublicWhisperConfig()
+      .then((config) => { if (active) setWhisperPublicConfig(config); })
+      .catch(() => { if (active) setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "" }); });
+    return () => { active = false; };
+  }, [readRequested]);
   useEffect(() => {
     let active = true;
     getAdminSession()
@@ -1581,6 +1696,7 @@ export default function App() {
       const route = readRoute();
       setView(route.view);
       setSelectedId(route.episodeId);
+      setReadMode(route.readMode);
       setArchiveTag(route.tag);
       setAdminOpen(false);
       setAdminMarkdownOpen(false);
@@ -1594,11 +1710,16 @@ export default function App() {
   useEffect(() => { window.scrollTo({ top: 0, behavior: "smooth" }); }, [view, selectedId, adminOpen]);
   const goTo = (next, episodeId = "", tag = "") => {
     const url = routeUrl(next, episodeId, tag);
+    if (readMode) {
+      window.location.assign(url);
+      return;
+    }
     if (`${window.location.pathname}${window.location.search}` !== url) {
       window.history.pushState({ tbaReader: true }, "", url);
     }
     setView(next);
     setSelectedId(episodeId);
+    setReadMode(false);
     setArchiveTag(tag);
     setAdminOpen(false);
     setAdminMarkdownOpen(false);
@@ -1656,6 +1777,16 @@ export default function App() {
     setShowcaseCache(writeShowcaseCache(filterEpisodesByAccess(next, accessTokenRef.current), accessTokenRef.current));
     return next;
   });
+  const clearLocalCache = () => {
+    try {
+      localStorage.removeItem(SHOWCASE_CACHE_KEY);
+      localStorage.removeItem(BOOKMARKS_KEY);
+    } catch {
+      // Le nettoyage visuel reste possible lorsque localStorage est indisponible.
+    }
+    setShowcaseCache({ episodes: [], savedAt: 0 });
+    setBookmarks(new Set());
+  };
   const saveEpisode = async (episode, files) => {
     const savedEpisode = await saveSupabaseEpisode(episode, files);
     updateEpisodeList((current) => {
@@ -1701,7 +1832,7 @@ export default function App() {
     if (view === "about") {
       return <div className="reader-data">
         {supabaseError && <SupabaseNotice text={supabaseError}/>}
-        <About accessToken={accessToken} onAccessTokenChange={changeAccessToken}/>
+        <About accessToken={accessToken} onAccessTokenChange={changeAccessToken} onClearLocalCache={clearLocalCache}/>
       </div>;
     }
     if (showBlockingSupabaseError) return <Empty title="Supabase indisponible" text={supabaseError}/>;
@@ -1721,7 +1852,7 @@ export default function App() {
     } else if (view === "episode" && (detailLoading || (selected && !selected.bodyLoaded) || (supabaseLoading && !selected))) {
       content = <LoadingSkeleton view="episode"/>;
     } else if (view === "episode" && selected) {
-      content = <EpisodePage episode={selected} onBack={() => navigate(selected.id === sorted[0]?.id ? "home" : "archive")} onTag={openTag} bookmarked={bookmarks.has(selected.id)} onToggleBookmark={toggleBookmark}/>;
+      content = <EpisodePage episode={selected} onBack={() => readMode ? window.location.assign(`/tba/${encodeURIComponent(selected.id)}?aread=true`) : navigate(selected.id === sorted[0]?.id ? "home" : "archive")} onTag={openTag} bookmarked={bookmarks.has(selected.id)} onToggleBookmark={toggleBookmark} readEnabled={readRequested && whisperPublicConfig.whisperEnabled && Boolean(whisperPublicConfig.modelUrl)} readMode={readMode} whisperModelUrl={whisperPublicConfig.modelUrl}/>;
     } else if (view === "episode") {
       content = <Empty title="TBA introuvable" text={`Aucun épisode ne correspond à l’identifiant ${selectedId}.`}/>;
     } else {
@@ -1740,7 +1871,7 @@ export default function App() {
       <div className="atmosphere" aria-hidden="true"/>
       {!adminMarkdownOpen && <header className="site-header"><button className="brand" onClick={() => navigate("home")}><span>TBA</span><small>Thomas Bizarre Aventure</small></button><button className="admin-entry" onClick={adminOpen && adminSession ? logoutAdmin : openAdmin} aria-label={adminOpen && adminSession ? "Déconnexion" : "Espace créateur"}><Icon name="lock" size={16}/> {adminOpen && adminSession ? "Déconnexion" : "Créer"}</button></header>}
       <main>
-        {adminOpen ? <Admin authReady={adminAuthReady} authenticated={Boolean(adminSession)} episodes={fullSorted} episodesReady={hasFreshData} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onForgetEpisode={forgetEpisode} onRenumber={renumberEpisodes} onSignIn={authenticateAdmin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
+        {adminOpen ? <Admin authReady={adminAuthReady} authenticated={Boolean(adminSession)} episodes={fullSorted} episodesReady={hasFreshData} markdownOpen={adminMarkdownOpen} onMarkdownOpenChange={setAdminMarkdownOpen} onSave={saveEpisode} onDelete={deleteEpisode} onForgetEpisode={forgetEpisode} onRenumber={renumberEpisodes} onSignIn={authenticateAdmin} onLoadEpisode={loadEpisode} onGetStorageStatus={getStorageStatus} onSaveStorageSettings={saveStorageSettings} onSetupR2={setupR2} onToggleR2={toggleR2} onToggleWhisper={toggleWhisperDistribution} onChangePin={changeAdminPin} onMigrate={migrateStorage} onClose={() => { setAdminMarkdownOpen(false); setAdminOpen(false); }}/>
           : readerView()}
       </main>
       {!adminOpen && <footer><div className="footer-brand"><Icon name="lock" size={14}/> TBA Reader</div><span>© 2026 — Bizave Corp.</span></footer>}

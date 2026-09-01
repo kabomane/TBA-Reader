@@ -12,6 +12,7 @@ Ne réutilisez jamais les identifiants, jetons, secrets ou PIN de l’installati
 - Supabase CLI, lancé avec `npx supabase` ;
 - un compte Cloudflare avec R2 activé ;
 - un projet Firebase Hosting, ou un autre hébergeur statique compatible SPA.
+- environ 60 Mo disponibles dans Firebase Hosting pour la source du modèle Whisper, si la transcription doit être proposée.
 
 ```powershell
 git clone https://github.com/kabomane/TBA-Reader.git
@@ -45,6 +46,7 @@ Remplacez :
 - le site Hosting dans `deploy/firebase.json` ;
 - les URLs `og:image`, `og:url` et `twitter:image` dans `index.html` ;
 - les trois domaines autorisés dans `supabase/functions/tba-admin/index.ts` : fonction `allowedOrigin` et liste `corsOrigins` de l’action `r2-setup`.
+- le fichier source Whisper `public/whisper/ggml-base-q5_1.bin` uniquement si vous changez de variante ; dans ce cas, mettez aussi à jour son identifiant, sa taille et son SHA-256 dans `src/whisperConfig.js` et dans l’Edge Function.
 
 Conservez les origines sans chemin final : `https://exemple.fr`, pas `https://exemple.fr/chemin`.
 
@@ -97,12 +99,13 @@ npx supabase db push
 npx supabase migration list --linked
 ```
 
-Les migrations créent la configuration hybride, les tables de suivi, les RPC, Vault, la configuration publique R2, le nettoyage des jobs et retirent les anciennes colonnes médias. Elles laissent la migration automatique et R2 désactivés par défaut.
+Les migrations créent la configuration hybride, les tables de suivi, les RPC, Vault, les configurations publiques R2 et Whisper, le nettoyage des jobs et retirent les anciennes colonnes médias. Elles laissent la migration automatique, R2 et Whisper désactivés par défaut.
 
 Après application, vérifiez que les tables suivantes ont RLS activé :
 
 - `episodes` : lecture pour `anon` et `authenticated`, aucune écriture publique ;
 - `tba_public_storage` : lecture publique uniquement ;
+- `tba_public_whisper` : lecture publique uniquement, avec une ligne singleton `id = true` ;
 - `tba_settings` et `tba_storage_jobs` : accès `service_role` uniquement.
 
 ## 4. Initialiser le PIN administrateur
@@ -148,7 +151,7 @@ Dans **Infrastructure → Paramètres → Bucket R2**, renseignez :
 - la valeur `cfat_...` comme jeton API ;
 - le nom du bucket.
 
-L’assistant crée ou retrouve le bucket, configure CORS, active l’URL publique `r2.dev` et conserve le jeton dans Supabase Vault. Activez ensuite le switch R2. La migration automatique reste indépendante et désactivée tant que son propre switch n’est pas activé.
+L’assistant crée ou retrouve le bucket, configure CORS, active l’URL publique `r2.dev` et conserve le jeton dans Supabase Vault. Activez ensuite le switch R2. La migration automatique et Whisper restent indépendants et désactivés tant que leurs propres switches ne sont pas activés.
 
 Pour une utilisation en production durable, préférez un domaine personnalisé R2 à `r2.dev`, qui est principalement prévu pour le développement. Si vous changez d’URL publique, mettez à jour `r2_public_url` dans `tba_settings` et `tba_public_storage` avec la même valeur.
 
@@ -163,6 +166,12 @@ Pour créer une archive depuis Vite, l’origine locale exacte doit aussi être 
 - l’adresse LAN utilisée par le téléphone, avec son port.
 
 Une image publique peut s’afficher sans cette permission, mais `fetch()` ne peut pas lire ses octets pour le ZIP. Les origines CORS doivent correspondre exactement au schéma, au domaine et au port.
+
+### Activer Whisper
+
+Après avoir configuré et activé R2, ouvrez **Infrastructure → Paramètres → Whisper Q5_b**. L’activation télécharge la source depuis le Firebase Hosting courant, vérifie sa taille et son SHA-256, puis la publie dans R2. Les utilisateurs ne téléchargent jamais la source Firebase : ils utilisent l’URL R2 enregistrée dans `tba_public_whisper` seulement lorsque `?aread=true` est présent.
+
+La désactivation supprime l’accès public avant de supprimer le fichier R2. Désactivez toujours Whisper avant de désactiver ou reconfigurer R2.
 
 ## 7. Installer Firebase Hosting et le domaine
 
@@ -203,6 +212,8 @@ Firebase doit afficher `Deploy complete!`. Vérifiez ensuite le domaine Firebase
 - les domaines sont autorisés par l’Edge Function et par R2 ;
 - Firebase réécrit toutes les routes vers `index.html` ;
 - R2 et la migration automatique sont désactivés jusqu’à activation explicite ;
+- Whisper est désactivé, `tba_public_whisper.whisper_ready` vaut `false` et aucune URL de modèle n’est publiée ;
+- l’activation Whisper fonctionne après activation de R2 et le modèle est servi depuis `r2.dev` ;
 - l’archive ZIP fonctionne depuis une origine autorisée sans supprimer de données.
 
 ## Documentation officielle

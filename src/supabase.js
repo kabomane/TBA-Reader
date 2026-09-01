@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { WHISPER_MODEL_BYTES, WHISPER_MODEL_SHA256 } from "./whisperConfig.js";
 
 const SUPABASE_URL = "https://lfgllmxdcnylabdcvmsk.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_YAuJXFnXZDQBWjvKjJ2-0A_lTOKdpYm";
@@ -574,6 +575,98 @@ export async function toggleR2(enabled) {
 
 export async function changeAdminPin(nextPin) {
   return adminRequest({ action: "change-pin", nextPin });
+}
+
+export async function getPublicWhisperConfig() {
+  const { data, error } = await getClient().rpc("tba_public_whisper_config");
+  if (error) throw error;
+  return {
+    whisperEnabled: data?.whisperEnabled === true,
+    modelUrl: typeof data?.modelUrl === "string" ? data.modelUrl : "",
+  };
+}
+
+async function downloadWhisperSource(url, expectedBytes, onProgress) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Modèle Firebase indisponible (${response.status}).`);
+  const total = Number(response.headers.get("content-length")) || expectedBytes;
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const blob = await response.blob();
+    onProgress({ phase: "download", progress: 1 });
+    return blob;
+  }
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    chunks.push(result.value);
+    received += result.value.byteLength;
+    onProgress({ phase: "download", progress: total ? received / total : 0 });
+  }
+  return new Blob(chunks, { type: "application/octet-stream" });
+}
+
+function uploadWhisperToR2(url, blob, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", url);
+    request.setRequestHeader("Content-Type", "application/octet-stream");
+    request.upload.onprogress = (event) => {
+      onProgress({ phase: "upload", progress: event.lengthComputable ? event.loaded / event.total : 0 });
+    };
+    request.onload = () => request.status >= 200 && request.status < 300
+      ? resolve()
+      : reject(new Error(`Envoi R2 refusé (${request.status}).`));
+    request.onerror = () => {
+      const error = new Error("Envoi du modèle vers R2 interrompu par le réseau ou CORS.");
+      error.retryable = true;
+      reject(error);
+    };
+    request.send(blob);
+  });
+}
+
+async function uploadWhisperWithRetry(url, blob, onProgress) {
+  const retryDelays = [0, 3_000, 7_000, 15_000];
+  let lastError = null;
+  for (const delay of retryDelays) {
+    if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+    try {
+      await uploadWhisperToR2(url, blob, onProgress);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!error?.retryable) throw error;
+    }
+  }
+  throw lastError || new Error("Envoi du modèle vers R2 impossible.");
+}
+
+export async function toggleWhisperDistribution(enabled, onProgress = () => {}) {
+  if (!enabled) return adminRequest({ action: "whisper-disable" });
+  try {
+    onProgress({ phase: "prepare", progress: 0 });
+    const started = await adminRequest({ action: "whisper-install-start" });
+    const expectedBytes = Number(started.expectedBytes) || WHISPER_MODEL_BYTES;
+    const expectedSha256 = String(started.expectedSha256 || WHISPER_MODEL_SHA256).toLowerCase();
+    const blob = await downloadWhisperSource(started.sourceUrl, expectedBytes, onProgress);
+    if (blob.size !== expectedBytes) throw new Error("Le modèle Firebase téléchargé est incomplet.");
+    onProgress({ phase: "verify", progress: 0 });
+    const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+    const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    if (checksum !== expectedSha256) throw new Error("Le modèle Firebase ne correspond pas à la version attendue.");
+    onProgress({ phase: "verify", progress: 1 });
+    await uploadWhisperWithRetry(started.uploadUrl, blob, onProgress);
+    onProgress({ phase: "publish", progress: 0 });
+    const result = await adminRequest({ action: "whisper-install-finish" });
+    onProgress({ phase: "publish", progress: 1 });
+    return result;
+  } catch (error) {
+    await adminRequest({ action: "whisper-install-cancel" }).catch(() => {});
+    throw error;
+  }
 }
 
 export async function migrateEpisodeStorage(episode, target, onProgress = () => {}) {

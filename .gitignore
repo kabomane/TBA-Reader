@@ -11,6 +11,7 @@ deploy/.firebase/
 .env.*
 !.env.example
 *.local
+.cert/
 
 .agents/
 .codex/
