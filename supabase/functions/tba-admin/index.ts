@@ -338,12 +338,20 @@ function r2CorsOrigins(origin: string) {
 async function configureR2Cors(accountId: string, token: string, bucket: string, origin: string) {
   await cloudflareFetch(accountId, token, `/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}/cors`, {
     method: "PUT",
-    body: JSON.stringify({ rules: [{
-      id: "tba-reader",
-      allowed: { methods: ["GET", "PUT", "HEAD", "DELETE"], origins: r2CorsOrigins(origin), headers: ["*"] },
-      exposeHeaders: ["etag", "content-length"],
-      maxAgeSeconds: 3600,
-    }] }),
+    body: JSON.stringify({ rules: [
+      {
+        id: "tba-reader-public-read",
+        allowed: { methods: ["GET", "HEAD"], origins: ["*"], headers: ["*"] },
+        exposeHeaders: ["etag", "content-length"],
+        maxAgeSeconds: 3600,
+      },
+      {
+        id: "tba-reader-admin-write",
+        allowed: { methods: ["PUT"], origins: r2CorsOrigins(origin), headers: ["*"] },
+        exposeHeaders: ["etag"],
+        maxAgeSeconds: 3600,
+      },
+    ] }),
   });
 }
 

@@ -7,7 +7,8 @@ const MODEL_STORE = "models";
 const TRANSCRIPT_STORE = "transcripts";
 const MODEL_REFRESH_MS = 30 * 24 * 60 * 60 * 1000;
 const WORKER_URL = "/whisper/whisper-worker.js";
-const CHUNK_SECONDS = 30;
+const CHUNK_SECONDS = 60;
+const LEGACY_CHUNK_SECONDS = 30;
 const CHUNK_TIMEOUT_MS = 10 * 60 * 1000;
 const TARGET_SAMPLE_RATE = 16000;
 
@@ -74,7 +75,13 @@ export async function hasCachedWhisperModel() {
 }
 
 async function downloadModel(modelUrl, signal, onProgress) {
-  const response = await fetch(modelUrl, { signal, cache: "no-store", mode: "cors" });
+  let response;
+  try {
+    response = await fetch(modelUrl, { signal, cache: "no-store", mode: "cors" });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw new Error("Téléchargement du modèle Whisper impossible (réseau ou CORS).");
+  }
   if (!response.ok) throw new Error(`Modèle Whisper indisponible (${response.status}).`);
   const total = Number(response.headers.get("content-length")) || WHISPER_MODEL_BYTES;
   const reader = response.body?.getReader?.();
@@ -149,6 +156,7 @@ async function readTranscript(episode) {
         blocks: record.blocks.map((block) => String(block || "")),
         nextChunk: Number.isInteger(record.nextChunk) && record.nextChunk > 0 ? record.nextChunk : 0,
         complete: Boolean(record.complete),
+        chunkSeconds: Number(record.chunkSeconds) || LEGACY_CHUNK_SECONDS,
       };
     }
     if (typeof record.text === "string") {
@@ -156,6 +164,7 @@ async function readTranscript(episode) {
         blocks: record.text.split(/\n{2,}/).filter(Boolean),
         nextChunk: 0,
         complete: true,
+        chunkSeconds: LEGACY_CHUNK_SECONDS,
       };
     }
     return null;
@@ -171,6 +180,7 @@ async function saveTranscript(episode, blocks, nextChunk, complete = false) {
     blocks: [...blocks],
     nextChunk,
     complete,
+    chunkSeconds: CHUNK_SECONDS,
     text: blocks.filter(Boolean).join("\n\n").trim(),
     savedAt: Date.now(),
   }).catch(() => {});
@@ -203,7 +213,8 @@ function resampleChunk(buffer, startSeconds, endSeconds) {
 
 function statusLabel(status, progress, chunk, totalChunks) {
   if (status === "cache") return "Lecture du cache…";
-  if (status === "loading") return progress > 0 && progress < 1 ? `Chargement du modèle · ${Math.round(progress * 100)} %` : "Préparation du modèle et de l’audio…";
+  if (status === "audio") return "Chargement de l’audio…";
+  if (status === "loading") return progress > 0 && progress < 1 ? `Chargement du modèle · ${Math.round(progress * 100)} %` : "Préparation du modèle…";
   if (status === "transcribing") return `Transcription · bloc ${Math.min(chunk + 1, totalChunks)}/${totalChunks}`;
   if (status === "stopped") return "Transcription arrêtée";
   if (status === "complete") return "Transcription terminée";
@@ -222,6 +233,20 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
   const abortRef = useRef(null);
   const audioContextRef = useRef(null);
   const runRef = useRef(0);
+
+  useEffect(() => {
+    if (!active || !episode?.audio) return undefined;
+    let alive = true;
+    const cacheRun = runRef.current;
+    readTranscript(episode)
+      .then((cached) => {
+        if (!alive || !cached || runRef.current !== cacheRun) return;
+        setBlocks(cached.blocks.filter(Boolean));
+        if (cached.complete) setStatus("complete");
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [active, episode]);
 
   const cleanup = useCallback(() => {
     abortRef.current?.abort();
@@ -259,6 +284,9 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
     if (!force) {
       cachedTranscript = await readTranscript(episode);
       if (runRef.current !== run) return;
+      if (cachedTranscript && !cachedTranscript.complete && cachedTranscript.chunkSeconds !== CHUNK_SECONDS) {
+        cachedTranscript = null;
+      }
       if (cachedTranscript) {
         setBlocks(cachedTranscript.blocks.filter(Boolean));
       }
@@ -275,7 +303,7 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
     }
 
     if (!cachedTranscript) setBlocks([]);
-    setStatus("loading");
+    setStatus("audio");
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -285,17 +313,28 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
       const context = new AudioContextClass();
       audioContextRef.current = context;
 
-      const modelPromise = loadModel(modelUrl, controller.signal, (nextProgress) => {
+      let audioResponse;
+      try {
+        audioResponse = await fetch(episode.audio, { signal: controller.signal, mode: "cors" });
+      } catch (audioError) {
+        if (audioError?.name === "AbortError") throw audioError;
+        const provider = episode.storageProvider === "r2" ? "Cloudflare R2" : "Supabase";
+        throw new Error(`Chargement audio depuis ${provider} impossible (réseau ou CORS).`);
+      }
+      if (!audioResponse.ok) throw new Error(`Audio indisponible (${audioResponse.status}).`);
+      const audioBytes = await audioResponse.arrayBuffer();
+      let decodedAudio;
+      try {
+        decodedAudio = await context.decodeAudioData(audioBytes.slice(0));
+      } catch {
+        throw new Error("Le format du fichier audio ne peut pas être décodé par ce navigateur.");
+      }
+      if (runRef.current !== run) return;
+
+      setStatus("loading");
+      const model = await loadModel(modelUrl, controller.signal, (nextProgress) => {
         if (runRef.current === run) setProgress(nextProgress);
       });
-      const audioPromise = fetch(episode.audio, { signal: controller.signal, mode: "cors" })
-        .then((response) => {
-          if (!response.ok) throw new Error(`Audio indisponible (${response.status}).`);
-          return response.arrayBuffer();
-        })
-        .then((audioBytes) => context.decodeAudioData(audioBytes.slice(0)));
-
-      const [model, decodedAudio] = await Promise.all([modelPromise, audioPromise]);
       if (runRef.current !== run) return;
       await context.close().catch(() => {});
       audioContextRef.current = null;
@@ -412,8 +451,8 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
     cleanup();
   }, [cleanup]);
 
-  const busy = ["cache", "loading", "transcribing"].includes(status);
-  const buttonLabel = ["complete", "stopped", "error"].includes(status) ? "Relire" : "Lire";
+  const busy = ["cache", "audio", "loading", "transcribing"].includes(status);
+  const buttonLabel = ["complete", "error"].includes(status) ? "Relire" : "Lire";
   const label = useMemo(() => statusLabel(status, progress, chunk, totalChunks), [chunk, progress, status, totalChunks]);
   const emptyText = error || (status === "complete" ? "Aucun texte reconnu." : status === "stopped" ? "Transcription arrêtée." : status === "transcribing" ? "Analyse du bloc en cours…" : "Préparation de la transcription…");
 
@@ -424,7 +463,7 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
     error,
     emptyText,
     label,
-    start: () => start({ force: status !== "idle" }),
+    start: () => start({ force: ["complete", "error"].includes(status) }),
     stop,
   };
 }

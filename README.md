@@ -19,7 +19,7 @@ Ce document décrit l’architecture actuellement déployée. Il ne doit conteni
 - Les signets restent dans `localStorage` et ne sont pas synchronisés entre appareils.
 - Une clé visuelle `TBA-XXXX-00` peut être chargée depuis **À propos** pour afficher les épisodes associés.
 - La vitrine utilise un cache local léger avec actualisation en arrière-plan des métadonnées publiques.
-- Avec `?aread=true`, un bouton **Lire** peut ouvrir `/lire/<share_id>` et transcrire localement l’audio lorsque Whisper est activé par un administrateur.
+- Avec `?ard=true`, un bouton **Lire** apparaît sur `/tba/<share_id>` et ouvre `/tba/<share_id>/rd?ard=true` pour transcrire localement l’audio lorsque Whisper est activé par un administrateur.
 - Le modèle Whisper est distribué par Cloudflare R2 puis conservé dans IndexedDB pendant un mois. L’audio et la transcription ne quittent pas le navigateur.
 
 ### Espace créateur
@@ -63,7 +63,7 @@ Entrer dans l’écran Stockage ne déclenche pas une nouvelle lecture. Le bouto
 - **Supabase Auth** : session administrateur persistante et JWT.
 - **Supabase Edge Functions** : validation du rôle Auth et opérations privilégiées R2/stockage.
 - **Cloudflare R2** : stockage secondaire compatible S3.
-- **Whisper.cpp WebAssembly** : transcription locale découpée en blocs.
+- **Whisper.cpp WebAssembly** : transcription locale découpée en blocs de 60 secondes.
 - **aws4fetch** : signature côté Edge Function des URL d’envoi direct vers R2.
 - **zip.js** : création progressive de l’archive complète dans le navigateur.
 - **Firebase Hosting** : hébergement du build et réécriture SPA.
@@ -257,7 +257,7 @@ L’Edge Function :
 
 - vérifie le jeton ;
 - crée le bucket s’il manque ;
-- configure CORS pour les domaines autorisés ;
+- configure CORS en lecture publique et limite les envois aux domaines administratifs autorisés ;
 - active l’adresse publique `r2.dev` ;
 - conserve les valeurs sensibles dans Supabase Vault ;
 - génère des identifiants R2 temporaires limités aux objets de l’épisode.
@@ -278,9 +278,9 @@ Lors de l’activation depuis **Infrastructure → Paramètres** :
 
 La désactivation retire d’abord l’URL publique de la base, puis supprime l’objet R2. Une clé R2 déjà absente est considérée comme correctement nettoyée, ce qui évite tout blocage après une installation interrompue. Une autre erreur de suppression laisse Whisper inaccessible et place l’installation dans l’état `cleanup_required`. R2 ne peut pas être désactivé ou reconfiguré tant que Whisper est installé ou doit être nettoyé.
 
-Avant chaque installation, l’Edge Function réapplique aussi la politique CORS R2 avec l’origine exacte de l’administration, y compris une IP locale HTTPS autorisée. Le navigateur réessaie automatiquement l’upload pendant la propagation éventuelle de la règle CORS.
-
-Le frontend ne consulte `tba_public_whisper` que lorsque le paramètre exact `?aread=true` est présent. Une consultation normale de TBA Reader ne produit donc aucune requête Supabase liée à Whisper. Après autorisation, le modèle est téléchargé exclusivement depuis R2, vérifié de nouveau puis conservé dans IndexedDB. Il n’existe aucun repli utilisateur vers Firebase.
+Avant chaque installation, l’Edge Function réapplique aussi la politique CORS R2. Les lectures publiques `GET`/`HEAD` acceptent toute origine, tandis que les envois `PUT` restent limités à l’origine exacte de l’administration et aux domaines TBA. Le navigateur réessaie automatiquement l’upload pendant la propagation éventuelle de la règle CORS.
+Pour réappliquer cette politique sur un bucket existant, désactiver puis réactiver Whisper depuis sa carte dédiée.
+Le frontend ne consulte `tba_public_whisper` que lorsque le paramètre exact `?ard=true` est présent. Ce flag masque la fonctionnalité sans l’autoriser : l’accès réel dépend de `whisperEnabled` et de l’URL du modèle renvoyés par Supabase. Une consultation normale de TBA Reader ne produit donc aucune requête Supabase liée à Whisper. Après autorisation, le modèle est téléchargé exclusivement depuis R2, vérifié de nouveau puis conservé dans IndexedDB. Il n’existe aucun repli utilisateur vers Firebase.
 
 ---
 
@@ -311,7 +311,7 @@ La fonction accepte uniquement `POST`. Sauf pour l’amorçage unique du compte,
 
 Le hash historique du PIN reste temporairement dans Vault pour amorcer le compte Auth sur une installation existante. Après création, le PIN est géré par Supabase Auth et n’est plus envoyé à chaque opération. Les secrets R2 restent exclusivement dans Vault. La clé utilisateur intégrée au JavaScript est publique ; la sécurité repose sur le mot de passe, la session, `app_metadata`, RLS et les policies Storage.
 
-CORS accepte les origines locales privées nécessaires au développement et les domaines Firebase TBA. CORS n’est pas un mécanisme d’authentification.
+CORS autorise la lecture des médias publics depuis toute origine. Les écritures restent limitées aux origines locales nécessaires au développement et aux domaines TBA. CORS n’est pas un mécanisme d’authentification.
 
 ---
 
@@ -378,9 +378,11 @@ Le cache vitrine ne contient pas les droits créateur. Les signets, la clé TBA 
 | Signets | `/signets` |
 | À propos | `/informations` |
 | Épisode | `/tba/<share_id>` |
-| Transcription locale | `/lire/<share_id>?aread=true` |
+| Transcription locale | `/tba/<share_id>/rd?ard=true` |
 
 Firebase réécrit toutes les routes vers `index.html`.
+Seule la route de transcription reçoit les en-têtes COOP/COEP nécessaires à Whisper. La page épisode reste non isolée afin de préserver les intégrations YouTube.
+Une ouverture directe de `/tba/<share_id>/rd` sans `?ard=true` redirige vers `/tba/<share_id>` sans conserver le flag. L’entrée et la sortie de la vue isolée utilisent une navigation complète ; le fond sombre défini directement dans `index.html` évite un flash blanc pendant ce rechargement.
 
 ---
 
@@ -439,8 +441,12 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - Une route d’épisode survit au rechargement direct.
 - Markdown, images, audio et YouTube fonctionnent sur téléphone et ordinateur.
 - Une clé TBA se charge sur HTTPS et affiche les épisodes associés.
-- Sans `?aread=true`, aucun bouton ni requête Supabase Whisper n’existe.
-- Avec le flag et Whisper actif, **Lire** reste grisé jusqu’au premier lancement de l’audio, puis la transcription s’affiche entre le média et le Markdown.
+- Sans `?ard=true`, aucun bouton ni requête Supabase Whisper n’existe.
+- Avec le flag et Whisper actif, **Lire** est immédiatement disponible et ouvre la vue dédiée `/tba/<share_id>/rd?ard=true`.
+- La vue dédiée contient seulement **Fermer**, **Lire/Relire** et la transcription.
+- Après le clic sur **Lire**, elle résout l’URL audio selon son fournisseur, charge et décode l’audio, puis charge le modèle Whisper local ou le télécharge dans IndexedDB avant de transcrire par blocs de 60 secondes.
+- Une transcription complète créée avec les anciens blocs de 30 secondes reste lisible. Une progression partielle en 30 secondes est ignorée ; une progression partielle en 60 secondes peut reprendre au prochain bloc.
+- `/tba/<share_id>/rd` sans le flag exact redirige vers l’épisode classique, sans flag.
 
 ### Administration
 
@@ -483,11 +489,10 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - La migration navigateur exige que l’administration reste ouverte pendant la copie.
 - Aucun Cron ne lance une migration lorsque personne n’utilise l’application.
 - Les signets et caches ne sont pas synchronisés entre appareils.
-- Une transcription interrompue reste uniquement dans l’IndexedDB de l’appareil ; **Relire** efface cette progression avant de recommencer.
+- Une transcription interrompue reste uniquement dans l’IndexedDB de l’appareil ; **Lire** reprend une progression compatible en blocs de 60 secondes, tandis que **Relire** régénère une transcription terminée.
 - Les métadonnées Open Graph restent statiques pour tout le site.
 - Le retour vers Supabase est impossible si un objet dépasse 50 Mo.
 - Le repli Blob de l’archive peut utiliser beaucoup de mémoire sur mobile pour une bibliothèque volumineuse.
-- Une origine locale absente de la politique CORS R2 peut afficher un média mais ne peut pas l’ajouter au ZIP.
 
 ---
 

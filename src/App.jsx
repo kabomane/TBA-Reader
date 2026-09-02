@@ -17,6 +17,7 @@ import {
   changeAdminPin,
   getAdminSession,
   getPublicWhisperConfig,
+  getPublicStorageUrl,
   getStorageStatus,
   loadEpisodeDetails as loadSupabaseEpisodeDetails,
   migrateEpisodeStorage,
@@ -34,7 +35,6 @@ import {
 } from "./supabase.js";
 
 const BOOKMARKS_KEY = "tba-bookmarks-v1";
-const READER_SCROLL_KEY = "tba-reader-scroll-v1";
 const R2_INCLUDED_BYTES = 10_000_000_000;
 const MAX_SUPABASE_FILE_BYTES = 50_000_000;
 const SHOWCASE_CACHE_KEY = "tba-showcase-cache-v1";
@@ -143,6 +143,9 @@ function toShowcaseEpisode(episode) {
     image: episode.image,
     youtube: episode.youtube,
     audio: episode.audio,
+    audioPath: episode.audioPath,
+    storageProvider: episode.storageProvider,
+    storageData: episode.storageData?.audio ? { audio: episode.storageData.audio } : undefined,
     palette: episode.palette,
     createdAt: episode.createdAt,
     cached: true,
@@ -212,25 +215,37 @@ function makeUuid() {
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
+const READER_PATH = /^\/tba\/([^/]+)\/rd$/;
+
+export function enforceReaderFlag() {
+  const path = window.location.pathname.replace(/\/+$/, "");
+  const match = path.match(READER_PATH);
+  if (!match) return true;
+  if (new URLSearchParams(window.location.search).get("ard") === "true") return true;
+  window.location.replace(`/tba/${match[1]}`);
+  return false;
+}
+
 function readRoute() {
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  const readerMatch = path.match(/^\/lire\/([^/]+)$/);
+  const readerMatch = path.match(READER_PATH);
   if (readerMatch) {
-    return { view: "episode", episodeId: decodeURIComponent(readerMatch[1]), tag: "", readMode: true };
+    return { view: "reader", episodeId: decodeURIComponent(readerMatch[1]), tag: "" };
   }
   const episodeMatch = path.match(/^\/tba\/([^/]+)$/);
   if (episodeMatch) {
-    return { view: "episode", episodeId: decodeURIComponent(episodeMatch[1]), tag: "", readMode: false };
+    return { view: "episode", episodeId: decodeURIComponent(episodeMatch[1]), tag: "" };
   }
   if (path === "/listes") {
-    return { view: "archive", episodeId: "", tag: new URLSearchParams(window.location.search).get("sujet") || "", readMode: false };
+    return { view: "archive", episodeId: "", tag: new URLSearchParams(window.location.search).get("sujet") || "" };
   }
-  if (path === "/signets") return { view: "bookmarks", episodeId: "", tag: "", readMode: false };
-  if (path === "/informations") return { view: "about", episodeId: "", tag: "", readMode: false };
-  return { view: "home", episodeId: "", tag: "", readMode: false };
+  if (path === "/signets") return { view: "bookmarks", episodeId: "", tag: "" };
+  if (path === "/informations") return { view: "about", episodeId: "", tag: "" };
+  return { view: "home", episodeId: "", tag: "" };
 }
 
 function routeUrl(view, episodeId = "", tag = "") {
+  if (view === "reader") return `/tba/${encodeURIComponent(episodeId)}/rd?ard=true`;
   if (view === "episode") return `/tba/${encodeURIComponent(episodeId)}`;
   if (view === "archive") return tag ? `/listes?sujet=${encodeURIComponent(tag)}` : "/listes";
   if (view === "bookmarks") return "/signets";
@@ -486,7 +501,7 @@ function Archive({ episodes, allTags, tag, setTag, onOpen, bookmarks, onToggleBo
   );
 }
 
-function AudioPlayer({ src, readControl = null, cors = false, onReadyChange = null }) {
+function AudioPlayer({ src, readControl = null }) {
   const audio = useRef(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -494,12 +509,9 @@ function AudioPlayer({ src, readControl = null, cors = false, onReadyChange = nu
   const [duration, setDuration] = useState(0);
   const [rate, setRate] = useState(1);
   const [audioError, setAudioError] = useState("");
-  const [canRead, setCanRead] = useState(false);
   useEffect(() => {
     setDuration(0);
-    setCanRead(false);
-    onReadyChange?.(false);
-  }, [onReadyChange, src]);
+  }, [src]);
   const toggle = async () => {
     if (!audio.current) return;
     if (playing) audio.current.pause();
@@ -525,7 +537,7 @@ function AudioPlayer({ src, readControl = null, cors = false, onReadyChange = nu
   return (
     <div className="audio-block">
       <div className="audio-player">
-        <audio ref={audio} src={src} crossOrigin={cors ? "anonymous" : undefined} preload="metadata" onLoadStart={() => { setCanRead(false); onReadyChange?.(false); }} onPlay={() => { setPlaying(true); setCanRead(true); onReadyChange?.(true); }} onPause={() => setPlaying(false)} onError={() => { setCanRead(false); onReadyChange?.(false); setAudioError("Ce fichier audio n’est pas compatible avec ce navigateur. Réencode-le en MP3, AAC ou M4A AAC."); }} onEnded={(event) => { setPlaying(false); syncAudioTime(event.currentTarget); }} onLoadedMetadata={(event) => syncAudioTime(event.currentTarget)} onDurationChange={(event) => syncAudioTime(event.currentTarget)} onTimeUpdate={(event) => syncAudioTime(event.currentTarget)}/>
+        <audio ref={audio} src={src} preload="metadata" onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onError={() => setAudioError("Ce fichier audio n’est pas compatible avec ce navigateur. Réencode-le en MP3, AAC ou M4A AAC.")} onEnded={(event) => { setPlaying(false); syncAudioTime(event.currentTarget); }} onLoadedMetadata={(event) => syncAudioTime(event.currentTarget)} onDurationChange={(event) => syncAudioTime(event.currentTarget)} onTimeUpdate={(event) => syncAudioTime(event.currentTarget)}/>
         <button onClick={toggle} aria-label={playing ? "Pause" : "Lecture"}><Icon name={playing ? "pause" : "play"}/></button>
         <div className="audio-line" onClick={(event) => { if (!audio.current || !Number.isFinite(audio.current.duration)) return; const rect = event.currentTarget.getBoundingClientRect(); audio.current.currentTime = ((event.clientX - rect.left) / rect.width) * audio.current.duration; syncAudioTime(audio.current); }}><i style={{ width: `${progress}%` }}/></div>
         <span className="audio-time">{formatAudioTime(currentTime)} / {formatAudioTime(duration)}</span>
@@ -533,69 +545,25 @@ function AudioPlayer({ src, readControl = null, cors = false, onReadyChange = nu
       {audioError && <p className="form-error" role="alert">{audioError}</p>}
       <div className="audio-speeds" aria-label="Vitesse de lecture">
         {[1, 1.5, 2].map((speed) => <button type="button" className={rate === speed ? "active" : ""} onClick={() => changeRate(speed)} aria-pressed={rate === speed} key={speed}>x{String(speed).replace(".", ",")}</button>)}
-        {readControl && <button type="button" className={`audio-read ${readControl.busy ? "is-busy" : ""}`} onClick={readControl.onClick} disabled={!canRead} aria-label={!canRead ? `${readControl.label} — lancez d’abord l’audio` : readControl.busy ? "Arrêter la transcription" : readControl.label} aria-busy={readControl.busy}>{readControl.label}{readControl.busy && <span className="transcription-spinner"/>}</button>}
+        {readControl && <button type="button" className="audio-read" onClick={readControl.onClick} aria-label={readControl.label}>{readControl.label}</button>}
       </div>
     </div>
   );
 }
 
-function TranscriptionPanel({ transcription }) {
-  const [expanded, setExpanded] = useState(true);
-  return <details className={`transcription-panel ${transcription.error ? "has-error" : ""}`} open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
-    <summary><span>Transcription</span><small>{transcription.label}</small><Icon name="chevron" size={16}/></summary>
-    <div className="transcription-content" role="log" aria-live="polite">
-      {transcription.blocks.length ? transcription.blocks.join("\n\n") : !transcription.error && <span>{transcription.emptyText}</span>}
-      {transcription.error && <span className="transcription-error" role="alert">{transcription.error}</span>}
-    </div>
-  </details>;
-}
-
-function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark, readEnabled = false, readMode = false, whisperModelUrl = "" }) {
+function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark, readEnabled = false }) {
   const video = youtubeId(episode.youtube);
   const hasBody = Boolean(episode.body?.trim());
   const hasContent = Boolean(video || episode.audio || hasBody);
-  const [audioReady, setAudioReady] = useState(false);
-  const transcription = useLocalTranscription(episode, readMode && readEnabled && audioReady, whisperModelUrl);
-  useEffect(() => {
-    if (!readMode) return undefined;
-    const key = `${READER_SCROLL_KEY}:${episode.id}`;
-    let stored = null;
-    try {
-      stored = window.sessionStorage.getItem(key);
-      window.sessionStorage.removeItem(key);
-    } catch {
-      return undefined;
-    }
-    const scrollTop = Number(stored);
-    if (stored === null || !Number.isFinite(scrollTop)) return undefined;
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => window.scrollTo({ top: scrollTop, behavior: "auto" }));
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      if (secondFrame) window.cancelAnimationFrame(secondFrame);
-    };
-  }, [episode.id, readMode]);
-  const openReader = () => {
-    try {
-      window.sessionStorage.setItem(`${READER_SCROLL_KEY}:${episode.id}`, String(window.scrollY));
-    } catch {
-      // La navigation reste fonctionnelle lorsque sessionStorage est indisponible.
-    }
-    window.location.assign(`/lire/${encodeURIComponent(episode.id)}?aread=true`);
-  };
+  const openReader = () => window.location.assign(`/tba/${encodeURIComponent(episode.id)}/rd?ard=true`);
   const readControl = readEnabled && episode.audio ? {
-    label: readMode ? transcription.buttonLabel : "Lire",
-    busy: readMode && transcription.busy,
-    onClick: readMode
-      ? (transcription.busy ? transcription.stop : transcription.start)
-      : openReader,
+    label: "Lire",
+    onClick: openReader,
   } : null;
   return (
     <article className="episode-page">
       <button className="back" onClick={onBack}><Icon name="back"/> Retour</button>
-      <div className="episode-hero"><div className="episode-visual"><Poster episode={episode} large cors={readMode}/><BookmarkButton active={bookmarked} onToggle={() => onToggleBookmark(episode.id)}/></div><div>
+      <div className="episode-hero"><div className="episode-visual"><Poster episode={episode} large/><BookmarkButton active={bookmarked} onToggle={() => onToggleBookmark(episode.id)}/></div><div>
         <p className="eyebrow">TBA — {formatEpisodeNumber(episode.number)}</p>
         <h1>{episode.title}</h1>
         <p className="lead">{episode.description}</p>
@@ -605,10 +573,38 @@ function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark, rea
       {hasContent && <div className="episode-body">
         <div className="content-divider" aria-hidden="true"><span>Contenu</span><i/></div>
         {video && <div className="video"><iframe src={`https://www.youtube-nocookie.com/embed/${video}`} title={episode.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen/></div>}
-        {episode.audio && <AudioPlayer src={episode.audio} readControl={readControl} cors={readMode} onReadyChange={setAudioReady}/>}
-        {readMode && readEnabled && episode.audio && <TranscriptionPanel transcription={transcription}/>}
-        {hasBody && <div className="prose"><MarkdownBody corsImages={readMode}>{episode.body}</MarkdownBody></div>}
+        {episode.audio && <AudioPlayer src={episode.audio} readControl={readControl}/>}
+        {hasBody && <div className="prose"><MarkdownBody>{episode.body}</MarkdownBody></div>}
       </div>}
+    </article>
+  );
+}
+
+function ReaderPage({ episode, onBack, whisperModelUrl }) {
+  const transcriptionEpisode = useMemo(() => {
+    const resolvedAudio = episode.audioPath
+      ? getPublicStorageUrl(episode.storageProvider, episode.audioPath)
+      : "";
+    return { ...episode, audio: resolvedAudio || episode.audio };
+  }, [episode]);
+  const transcription = useLocalTranscription(transcriptionEpisode, true, whisperModelUrl);
+  const empty = !transcription.blocks.length && !transcription.busy && !transcription.label;
+  return (
+    <article className="reader-page">
+      <div className="reader-actions">
+        <button type="button" className="reader-close" onClick={onBack}><Icon name="back"/> Fermer</button>
+        <button type="button" className={`audio-read ${transcription.busy ? "is-busy" : ""}`} onClick={transcription.busy ? transcription.stop : transcription.start} aria-busy={transcription.busy}>
+          {transcription.busy ? "Arrêter" : transcription.buttonLabel}
+          {transcription.busy && <span className="transcription-spinner"/>}
+        </button>
+        {transcription.label && <span className="sr-only" role="status">{transcription.label}</span>}
+      </div>
+      <div className="reader-transcript" role="log" aria-live="polite">
+        {transcription.blocks.length
+          ? transcription.blocks.map((block, index) => <p key={index}>{block}</p>)
+          : !transcription.error && <p className="reader-empty">{empty ? "Aucune transcription enregistrée pour cet épisode. Lancez la lecture pour la générer." : transcription.emptyText}</p>}
+        {transcription.error && <p className="transcription-error" role="alert">{transcription.error}</p>}
+      </div>
     </article>
   );
 }
@@ -1559,11 +1555,10 @@ export default function App() {
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
-  const readRequested = new URLSearchParams(window.location.search).get("aread") === "true";
-  const [whisperPublicConfig, setWhisperPublicConfig] = useState({ whisperEnabled: false, modelUrl: "" });
+  const readRequested = new URLSearchParams(window.location.search).get("ard") === "true";
+  const [whisperPublicConfig, setWhisperPublicConfig] = useState({ whisperEnabled: false, modelUrl: "", ready: false });
   const [view, setView] = useState(initialRoute.current.view);
   const [selectedId, setSelectedId] = useState(initialRoute.current.episodeId);
-  const [readMode, setReadMode] = useState(initialRoute.current.readMode);
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminMarkdownOpen, setAdminMarkdownOpen] = useState(false);
   const [adminSession, setAdminSession] = useState(null);
@@ -1590,15 +1585,21 @@ export default function App() {
   const bookmarkedEpisodes = useMemo(() => sorted.filter((episode) => bookmarks.has(episode.id)), [sorted, bookmarks]);
   useEffect(() => {
     if (!readRequested) {
-      setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "" });
+      setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "", ready: true });
       return undefined;
     }
     let active = true;
     getPublicWhisperConfig()
-      .then((config) => { if (active) setWhisperPublicConfig(config); })
-      .catch(() => { if (active) setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "" }); });
+      .then((config) => { if (active) setWhisperPublicConfig({ ...config, ready: true }); })
+      .catch(() => { if (active) setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "", ready: true }); });
     return () => { active = false; };
   }, [readRequested]);
+  useEffect(() => {
+    if (view !== "reader" || !whisperPublicConfig.ready) return;
+    const usable = whisperPublicConfig.whisperEnabled && whisperPublicConfig.modelUrl;
+    if (usable && (!hasFreshData || selected?.audio)) return;
+    window.location.replace(`/tba/${encodeURIComponent(selectedId)}?ard=true`);
+  }, [hasFreshData, selected, selectedId, view, whisperPublicConfig]);
   useEffect(() => {
     let active = true;
     getAdminSession()
@@ -1696,7 +1697,6 @@ export default function App() {
       const route = readRoute();
       setView(route.view);
       setSelectedId(route.episodeId);
-      setReadMode(route.readMode);
       setArchiveTag(route.tag);
       setAdminOpen(false);
       setAdminMarkdownOpen(false);
@@ -1710,7 +1710,7 @@ export default function App() {
   useEffect(() => { window.scrollTo({ top: 0, behavior: "smooth" }); }, [view, selectedId, adminOpen]);
   const goTo = (next, episodeId = "", tag = "") => {
     const url = routeUrl(next, episodeId, tag);
-    if (readMode) {
+    if (view === "reader" || next === "reader") {
       window.location.assign(url);
       return;
     }
@@ -1719,7 +1719,6 @@ export default function App() {
     }
     setView(next);
     setSelectedId(episodeId);
-    setReadMode(false);
     setArchiveTag(tag);
     setAdminOpen(false);
     setAdminMarkdownOpen(false);
@@ -1845,6 +1844,12 @@ export default function App() {
       content = <Archive episodes={sorted.slice(1)} allTags={allTags} tag={archiveTag} setTag={changeArchiveTag} onOpen={openEpisode} bookmarks={bookmarks} onToggleBookmark={toggleBookmark}/>;
     } else if (view === "bookmarks") {
       content = <BookmarksPage episodes={bookmarkedEpisodes} onOpen={openEpisode} onTag={openTag} bookmarks={bookmarks} onToggleBookmark={toggleBookmark}/>;
+    } else if (view === "reader" && (!whisperPublicConfig.ready || !whisperPublicConfig.whisperEnabled || !whisperPublicConfig.modelUrl || (!hasFreshData && !selected))) {
+      content = <LoadingSkeleton view="episode"/>;
+    } else if (view === "reader" && selected) {
+      content = <ReaderPage episode={selected} onBack={() => window.location.assign(`/tba/${encodeURIComponent(selected.id)}?ard=true`)} whisperModelUrl={whisperPublicConfig.modelUrl}/>;
+    } else if (view === "reader") {
+      content = showInitialSkeleton ? <LoadingSkeleton view="episode"/> : <Empty title="TBA introuvable" text={`Aucun épisode ne correspond à l’identifiant ${selectedId}.`}/>;
     } else if (view === "episode" && detailError) {
       content = <Empty title="Contenu indisponible" text={detailError}/>;
     } else if (view === "episode" && selected?.cached && supabaseError && !selected.bodyLoaded) {
@@ -1852,7 +1857,7 @@ export default function App() {
     } else if (view === "episode" && (detailLoading || (selected && !selected.bodyLoaded) || (supabaseLoading && !selected))) {
       content = <LoadingSkeleton view="episode"/>;
     } else if (view === "episode" && selected) {
-      content = <EpisodePage episode={selected} onBack={() => readMode ? window.location.assign(`/tba/${encodeURIComponent(selected.id)}?aread=true`) : navigate(selected.id === sorted[0]?.id ? "home" : "archive")} onTag={openTag} bookmarked={bookmarks.has(selected.id)} onToggleBookmark={toggleBookmark} readEnabled={readRequested && whisperPublicConfig.whisperEnabled && Boolean(whisperPublicConfig.modelUrl)} readMode={readMode} whisperModelUrl={whisperPublicConfig.modelUrl}/>;
+      content = <EpisodePage episode={selected} onBack={() => navigate(selected.id === sorted[0]?.id ? "home" : "archive")} onTag={openTag} bookmarked={bookmarks.has(selected.id)} onToggleBookmark={toggleBookmark} readEnabled={readRequested && whisperPublicConfig.whisperEnabled && Boolean(whisperPublicConfig.modelUrl)}/>;
     } else if (view === "episode") {
       content = <Empty title="TBA introuvable" text={`Aucun épisode ne correspond à l’identifiant ${selectedId}.`}/>;
     } else {

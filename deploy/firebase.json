@@ -9,7 +9,7 @@
     ],
     "headers": [
       {
-        "source": "/lire/**",
+        "source": "/tba/*/rd",
         "headers": [
           {
             "key": "Cross-Origin-Opener-Policy",

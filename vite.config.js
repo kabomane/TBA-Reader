@@ -19,7 +19,7 @@ const isolationHeaders = {
 function tbaReaderIsolation() {
   const middleware = (request, response, next) => {
     const pathname = new URL(request.url || "/", "http://localhost").pathname;
-    if (/^\/(?:lire|whisper)\//.test(pathname)) {
+    if (/^\/tba\/[^/]+\/rd$/.test(pathname) || /^\/whisper\//.test(pathname)) {
       Object.entries(isolationHeaders).forEach(([key, value]) => response.setHeader(key, value));
     }
     if (/^\/whisper\//.test(pathname)) response.setHeader("Cross-Origin-Resource-Policy", "same-origin");

@@ -251,22 +251,19 @@ main { position: relative; z-index: 1; width: min(calc(100% - 36px), var(--max))
 .audio-speeds button:hover { border-color: var(--line-strong); color: var(--text); }
 .audio-speeds button.active { border-color: rgba(220,174,89,.6); background: var(--accent-soft); color: var(--accent); }
 .audio-speeds .audio-read { min-width: 68px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
-.audio-speeds .audio-read:disabled { opacity: .42; color: var(--muted); cursor: not-allowed; }
-.audio-speeds .audio-read.is-busy { border-color: rgba(220,174,89,.65); background: var(--accent-soft); color: var(--accent); cursor: pointer; }
-.audio-speeds .audio-read.is-busy:hover { border-color: rgba(220,174,89,.8); color: #e7c680; }
+.audio-read.is-busy { border-color: rgba(220,174,89,.65); background: var(--accent-soft); color: var(--accent); cursor: pointer; }
+.audio-read.is-busy:hover { border-color: rgba(220,174,89,.8); color: #e7c680; }
 .transcription-spinner { width: 13px; height: 13px; flex: 0 0 auto; border: 2px solid rgba(220,174,89,.22); border-top-color: var(--accent); border-radius: 50%; animation: button-spin .7s linear infinite; }
-.transcription-panel { margin: -12px 0 34px; overflow: hidden; border: 1px solid rgba(220,174,89,.24); border-radius: 17px; background: linear-gradient(145deg,rgba(220,174,89,.07),rgba(18,18,21,.88)); }
-.transcription-panel summary { min-height: 58px; padding: 0 17px; display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 11px; color: var(--text); cursor: pointer; list-style: none; }
-.transcription-panel summary::-webkit-details-marker { display: none; }
-.transcription-panel summary span { font: 600 20px var(--serif); }
-.transcription-panel summary small { color: var(--muted); font: 9px ui-monospace,monospace; text-align: right; }
-.transcription-panel summary svg { color: var(--accent); transition: transform .18s ease; }
-.transcription-panel[open] summary svg { transform: rotate(180deg); }
-.transcription-content { min-height: 112px; padding: 18px 20px 22px; border-top: 1px solid var(--line); color: #d6d1c7; font: 17px/1.75 var(--serif); white-space: pre-wrap; overflow-wrap: anywhere; }
-.transcription-content > span { color: var(--muted); font: 12px/1.55 var(--sans); }
-.transcription-content .transcription-error { display: block; margin-top: 16px; padding: 12px 14px; border: 1px solid rgba(229,141,123,.28); border-radius: 11px; background: rgba(128,61,53,.1); color: #e58d7b; }
-.transcription-panel.has-error { border-color: rgba(229,141,123,.36); }
-.transcription-panel.has-error .transcription-content > span { color: #e58d7b; }
+.reader-page { width: min(100%, 900px); margin: 0 auto; }
+.reader-actions { width: min(100%, 360px); margin: 0 0 20px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.reader-actions .reader-close, .reader-actions .audio-read { min-height: 44px; padding: 0 18px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 12px; font-weight: 700; cursor: pointer; }
+.reader-actions .reader-close { color: var(--muted); }
+.reader-actions .reader-close svg { color: var(--accent); }
+.reader-transcript { min-height: 180px; padding: clamp(22px,5vw,38px); border: 1px solid rgba(220,174,89,.24); border-radius: 20px; background: linear-gradient(145deg,rgba(220,174,89,.07),rgba(18,18,21,.88)); color: #d6d1c7; font: clamp(18px,2.4vw,22px)/1.75 var(--serif); overflow-wrap: anywhere; }
+.reader-transcript p { margin: 0; white-space: pre-wrap; }
+.reader-transcript p + p { margin-top: 1.4em; }
+.reader-empty { color: var(--muted); font: 13px/1.6 var(--sans); }
+.reader-transcript .transcription-error { padding: 12px 14px; border: 1px solid rgba(229,141,123,.28); border-radius: 11px; background: rgba(128,61,53,.1); color: #e58d7b; font: 12px/1.55 var(--sans); }
 .about { width: min(100%, 960px); max-width: none; margin: 0 auto; }
 .about-heading { max-width: 650px; margin: 0 auto; text-align: left; }
 .about-copy { max-width: 650px; margin: 18px auto 0; color: var(--muted); font: 20px/1.65 var(--serif); text-align: left; }

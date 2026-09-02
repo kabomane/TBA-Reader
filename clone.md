@@ -157,21 +157,23 @@ Pour une utilisation en production durable, préférez un domaine personnalisé 
 
 ### CORS R2
 
-Les domaines présents dans `corsOrigins` sont appliqués lorsque **Créer et connecter R2** ou **Tester et reconfigurer** est lancé. Ajoutez-y tous les domaines de production avant le déploiement de l’Edge Function.
+La politique R2 sépare les lectures publiques des écritures administratives. Les requêtes `GET` et `HEAD` acceptent toute origine afin que les médias et le modèle Whisper puissent être chargés par le navigateur. Les requêtes `PUT` restent limitées aux domaines présents dans `corsOrigins`. Ajoutez-y tous les domaines d’administration avant le déploiement de l’Edge Function.
 
-Pour créer une archive depuis Vite, l’origine locale exacte doit aussi être autorisée dans la politique CORS R2, par exemple :
+Pour envoyer un fichier depuis Vite, l’origine locale exacte doit aussi être autorisée dans la politique CORS R2, par exemple :
 
-- `http://localhost:5173` ;
-- `http://127.0.0.1:5173` ;
+- `http://localhost:5174` ;
+- `http://127.0.0.1:5174` ;
 - l’adresse LAN utilisée par le téléphone, avec son port.
 
-Une image publique peut s’afficher sans cette permission, mais `fetch()` ne peut pas lire ses octets pour le ZIP. Les origines CORS doivent correspondre exactement au schéma, au domaine et au port.
+Les origines d’écriture doivent correspondre exactement au schéma, au domaine et au port. **Créer et connecter R2**, **Tester et reconfigurer** et l’activation de Whisper réappliquent cette politique.
 
 ### Activer Whisper
 
-Après avoir configuré et activé R2, ouvrez **Infrastructure → Paramètres → Whisper Q5_b**. L’activation télécharge la source depuis le Firebase Hosting courant, vérifie sa taille et son SHA-256, puis la publie dans R2. Les utilisateurs ne téléchargent jamais la source Firebase : ils utilisent l’URL R2 enregistrée dans `tba_public_whisper` seulement lorsque `?aread=true` est présent.
+Après avoir configuré et activé R2, ouvrez **Infrastructure → Paramètres → Whisper Q5_b**. L’activation télécharge le modèle multilingue Base Q5_1 depuis le Firebase Hosting courant, vérifie sa taille et son SHA-256, puis le publie dans R2. Les utilisateurs ne téléchargent jamais la source Firebase : ils utilisent l’URL R2 enregistrée dans `tba_public_whisper` seulement lorsque `?ard=true` est présent.
 
-La désactivation supprime l’accès public avant de supprimer le fichier R2. Désactivez toujours Whisper avant de désactiver ou reconfigurer R2.
+Le bouton **Lire** de `/tba/<share_id>?ard=true` ouvre la vue dédiée `/tba/<share_id>/rd?ard=true`. Cette vue charge d’abord l’audio depuis Supabase Storage ou R2, puis charge le modèle depuis IndexedDB ou R2 et transcrit localement par blocs de 60 secondes. Une route `/rd` ouverte sans le flag exact revient vers l’épisode classique.
+
+La désactivation supprime l’accès public avant de supprimer le fichier R2. Désactivez toujours Whisper avant de désactiver ou reconfigurer R2. Pour réappliquer CORS sans bouton supplémentaire, désactivez puis réactivez Whisper depuis sa carte dédiée.
 
 ## 7. Installer Firebase Hosting et le domaine
 
@@ -182,7 +184,7 @@ npm ci
 npm exec firebase -- login
 ```
 
-Associez le projet dans `deploy/.firebaserc`, le site dans `deploy/firebase.json`, puis configurez le domaine personnalisé dans la console Firebase Hosting. Ajoutez ce domaine aux deux listes CORS de l’Edge Function avant de la redéployer et de reconfigurer R2.
+Associez le projet dans `deploy/.firebaserc`, le site dans `deploy/firebase.json`, puis configurez le domaine personnalisé dans la console Firebase Hosting. Ajoutez ce domaine aux origines d’écriture de l’Edge Function avant de la redéployer et de reconfigurer R2.
 
 ## 8. Build et publication
 
@@ -211,9 +213,11 @@ Firebase doit afficher `Deploy complete!`. Vérifiez ensuite le domaine Firebase
 - le compte Auth possède `app_metadata.role = tba_admin` après la première connexion ;
 - les domaines sont autorisés par l’Edge Function et par R2 ;
 - Firebase réécrit toutes les routes vers `index.html` ;
+- seule `/tba/<share_id>/rd` reçoit les en-têtes COOP/COEP de Whisper et son rechargement conserve le fond sombre ;
 - R2 et la migration automatique sont désactivés jusqu’à activation explicite ;
 - Whisper est désactivé, `tba_public_whisper.whisper_ready` vaut `false` et aucune URL de modèle n’est publiée ;
 - l’activation Whisper fonctionne après activation de R2 et le modèle est servi depuis `r2.dev` ;
+- `?ard=true` affiche **Lire**, la vue `/rd` transcrit par blocs de 60 secondes et `/rd` sans flag revient vers l’épisode ;
 - l’archive ZIP fonctionne depuis une origine autorisée sans supprimer de données.
 
 ## Documentation officielle
