@@ -1,6 +1,23 @@
 {
-  "id": "whisper-base-q5_1-fr-v1",
-  "sha256": "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
-  "bytes": 59707625,
-  "path": "/whisper/ggml-base-q5_1.bin"
+  "version": 2,
+  "models": [
+    {
+      "key": "tiny",
+      "id": "whisper-tiny-q5_1-fr-v1",
+      "name": "Tiny Q5_1",
+      "qualifier": "rapide",
+      "sha256": "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
+      "bytes": 32152673,
+      "path": "/whisper/ggml-tiny-q5_1.bin"
+    },
+    {
+      "key": "base",
+      "id": "whisper-base-q5_1-fr-v1",
+      "name": "Base Q5_1",
+      "qualifier": "précis",
+      "sha256": "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
+      "bytes": 59707625,
+      "path": "/whisper/ggml-base-q5_1.bin"
+    }
+  ]
 }

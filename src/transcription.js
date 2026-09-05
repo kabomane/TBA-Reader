@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { WHISPER_MODEL_BYTES, WHISPER_MODEL_ID, WHISPER_MODEL_SHA256 } from "./whisperConfig.js";
+import { WHISPER_MODELS, WHISPER_MODEL_KEYS } from "./whisperConfig.js";
 
 const DB_NAME = "tba-reader-whisper-v1";
 const DB_VERSION = 1;
@@ -61,20 +61,21 @@ async function deleteRecord(storeName, id) {
   });
 }
 
-async function readModelCache() {
+async function readModelCache(model) {
   try {
-    const cached = await readRecord(MODEL_STORE, WHISPER_MODEL_ID);
-    return cached?.sha256 === WHISPER_MODEL_SHA256 && cached.blob instanceof Blob ? cached : null;
+    const cached = await readRecord(MODEL_STORE, model.id);
+    return cached?.sha256 === model.sha256 && cached.blob instanceof Blob ? cached : null;
   } catch {
     return null;
   }
 }
 
-export async function hasCachedWhisperModel() {
-  return Boolean(await readModelCache());
+export async function cachedWhisperModelKeys() {
+  const cached = await Promise.all(WHISPER_MODEL_KEYS.map(async (key) => [key, Boolean(await readModelCache(WHISPER_MODELS[key]))]));
+  return cached.filter(([, available]) => available).map(([key]) => key);
 }
 
-async function downloadModel(modelUrl, signal, onProgress) {
+async function downloadModel(model, modelUrl, signal, onProgress) {
   let response;
   try {
     response = await fetch(modelUrl, { signal, cache: "no-store", mode: "cors" });
@@ -83,44 +84,45 @@ async function downloadModel(modelUrl, signal, onProgress) {
     throw new Error("Téléchargement du modèle Whisper impossible (réseau ou CORS).");
   }
   if (!response.ok) throw new Error(`Modèle Whisper indisponible (${response.status}).`);
-  const total = Number(response.headers.get("content-length")) || WHISPER_MODEL_BYTES;
+  const total = Number(response.headers.get("content-length")) || model.bytes;
   const reader = response.body?.getReader?.();
+  let bytes;
   if (!reader) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    bytes = new Uint8Array(await response.arrayBuffer());
     onProgress?.(1);
-    return bytes;
+  } else {
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      chunks.push(result.value);
+      received += result.value.byteLength;
+      onProgress?.(total ? received / total : 0);
+    }
+    bytes = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
   }
-  const chunks = [];
-  let received = 0;
-  while (true) {
-    const result = await reader.read();
-    if (result.done) break;
-    chunks.push(result.value);
-    received += result.value.byteLength;
-    onProgress?.(total ? received / total : 0);
-  }
-  const bytes = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  if (bytes.byteLength !== WHISPER_MODEL_BYTES) throw new Error("Le modèle Whisper téléchargé est incomplet.");
+  if (bytes.byteLength !== model.bytes) throw new Error(`${model.name} téléchargé est incomplet.`);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-  if (checksum !== WHISPER_MODEL_SHA256) throw new Error("Le modèle Whisper téléchargé est corrompu.");
+  if (checksum !== model.sha256) throw new Error(`${model.name} téléchargé est corrompu.`);
   return bytes;
 }
 
-async function loadModel(modelUrl, signal, onProgress) {
-  const cached = await readModelCache();
+async function loadModel(model, modelUrl, signal, onProgress) {
+  const cached = await readModelCache(model);
   const cacheFresh = cached && Number.isFinite(cached.checkedAt) && Date.now() - cached.checkedAt < MODEL_REFRESH_MS;
   if (cacheFresh) {
     onProgress?.(1);
     return cached.blob.arrayBuffer();
   }
 
-  if (cached && cached.blob.size === WHISPER_MODEL_BYTES) {
+  if (cached && cached.blob.size === model.bytes) {
     const refreshed = { ...cached, checkedAt: Date.now() };
     await writeRecord(MODEL_STORE, refreshed).catch(() => {});
     onProgress?.(1);
@@ -128,11 +130,11 @@ async function loadModel(modelUrl, signal, onProgress) {
   }
 
   if (!modelUrl) throw new Error("Adresse publique du modèle Whisper absente.");
-  const bytes = await downloadModel(modelUrl, signal, onProgress);
+  const bytes = await downloadModel(model, modelUrl, signal, onProgress);
   const blob = new Blob([bytes], { type: "application/octet-stream" });
   await writeRecord(MODEL_STORE, {
-    id: WHISPER_MODEL_ID,
-    sha256: WHISPER_MODEL_SHA256,
+    id: model.id,
+    sha256: model.sha256,
     blob,
     savedAt: Date.now(),
     checkedAt: Date.now(),
@@ -141,16 +143,16 @@ async function loadModel(modelUrl, signal, onProgress) {
   return bytes.buffer;
 }
 
-function transcriptId(episode) {
+function transcriptId(episode, model) {
   const audio = episode.storageData?.audio || {};
   const identity = audio.key || episode.audioPath || episode.audio || "audio";
-  return ["transcript", episode.uid || episode.id, identity, audio.etag || audio.size || "", WHISPER_MODEL_SHA256].join(":");
+  return ["transcript", episode.uid || episode.id, identity, audio.etag || audio.size || "", model.sha256].join(":");
 }
 
-async function readTranscript(episode) {
+async function readTranscript(episode, model) {
   try {
-    const record = await readRecord(TRANSCRIPT_STORE, transcriptId(episode));
-    if (record?.model !== WHISPER_MODEL_SHA256) return null;
+    const record = await readRecord(TRANSCRIPT_STORE, transcriptId(episode, model));
+    if (record?.model !== model.sha256) return null;
     if (Array.isArray(record.blocks)) {
       return {
         blocks: record.blocks.map((block) => String(block || "")),
@@ -173,10 +175,10 @@ async function readTranscript(episode) {
   }
 }
 
-async function saveTranscript(episode, blocks, nextChunk, complete = false) {
+async function saveTranscript(episode, model, blocks, nextChunk, complete = false) {
   await writeRecord(TRANSCRIPT_STORE, {
-    id: transcriptId(episode),
-    model: WHISPER_MODEL_SHA256,
+    id: transcriptId(episode, model),
+    model: model.sha256,
     blocks: [...blocks],
     nextChunk,
     complete,
@@ -186,8 +188,8 @@ async function saveTranscript(episode, blocks, nextChunk, complete = false) {
   }).catch(() => {});
 }
 
-async function removeTranscript(episode) {
-  await deleteRecord(TRANSCRIPT_STORE, transcriptId(episode)).catch(() => {});
+async function removeTranscript(episode, model) {
+  await deleteRecord(TRANSCRIPT_STORE, transcriptId(episode, model)).catch(() => {});
 }
 
 function resampleChunk(buffer, startSeconds, endSeconds) {
@@ -222,7 +224,7 @@ function statusLabel(status, progress, chunk, totalChunks) {
   return "";
 }
 
-export function useLocalTranscription(episode, active, modelUrl = "") {
+export function useLocalTranscription(episode, active, model, modelUrl = "") {
   const [status, setStatus] = useState("idle");
   const [blocks, setBlocks] = useState([]);
   const [error, setError] = useState("");
@@ -238,7 +240,13 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
     if (!active || !episode?.audio) return undefined;
     let alive = true;
     const cacheRun = runRef.current;
-    readTranscript(episode)
+    setStatus("idle");
+    setBlocks([]);
+    setError("");
+    setProgress(0);
+    setChunk(0);
+    setTotalChunks(0);
+    readTranscript(episode, model)
       .then((cached) => {
         if (!alive || !cached || runRef.current !== cacheRun) return;
         setBlocks(cached.blocks.filter(Boolean));
@@ -246,7 +254,7 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
       })
       .catch(() => {});
     return () => { alive = false; };
-  }, [active, episode]);
+  }, [active, episode, model]);
 
   const cleanup = useCallback(() => {
     abortRef.current?.abort();
@@ -276,13 +284,13 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
     setTotalChunks(0);
     if (force) {
       setBlocks([]);
-      await removeTranscript(episode);
+      await removeTranscript(episode, model);
     }
     setStatus("cache");
 
     let cachedTranscript = null;
     if (!force) {
-      cachedTranscript = await readTranscript(episode);
+      cachedTranscript = await readTranscript(episode, model);
       if (runRef.current !== run) return;
       if (cachedTranscript && !cachedTranscript.complete && cachedTranscript.chunkSeconds !== CHUNK_SECONDS) {
         cachedTranscript = null;
@@ -332,7 +340,7 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
       if (runRef.current !== run) return;
 
       setStatus("loading");
-      const model = await loadModel(modelUrl, controller.signal, (nextProgress) => {
+      const modelBytes = await loadModel(model, modelUrl, controller.signal, (nextProgress) => {
         if (runRef.current === run) setProgress(nextProgress);
       });
       if (runRef.current !== run) return;
@@ -418,14 +426,14 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
             setBlocks(completedChunkTexts.filter(Boolean));
             const snapshot = [...completedChunkTexts];
             const savedNextChunk = currentChunk;
-            transcriptSave = transcriptSave.then(() => saveTranscript(episode, snapshot, savedNextChunk, savedNextChunk >= chunks));
+            transcriptSave = transcriptSave.then(() => saveTranscript(episode, model, snapshot, savedNextChunk, savedNextChunk >= chunks));
             window.setTimeout(sendChunk, 0);
           } else if (message.type === "error") {
             clearChunkTimeout();
             reject(new Error(message.message || "Erreur du moteur Whisper."));
           }
         };
-        worker.postMessage({ type: "init-model", model }, [model]);
+        worker.postMessage({ type: "init-model", model: modelBytes }, [modelBytes]);
       });
 
       if (runRef.current !== run) return;
@@ -433,7 +441,7 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
       workerRef.current = null;
       abortRef.current = null;
       await transcriptSave;
-      await saveTranscript(episode, completedChunkTexts, chunks, true);
+      await saveTranscript(episode, model, completedChunkTexts, chunks, true);
       if (runRef.current === run) {
         setChunk(chunks);
         setStatus("complete");
@@ -444,7 +452,7 @@ export function useLocalTranscription(episode, active, modelUrl = "") {
       setStatus("error");
       setError(nextError?.message || "Transcription impossible.");
     }
-  }, [active, cleanup, episode, modelUrl]);
+  }, [active, cleanup, episode, model, modelUrl]);
 
   useEffect(() => () => {
     runRef.current += 1;

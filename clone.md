@@ -12,7 +12,7 @@ Ne réutilisez jamais les identifiants, jetons, secrets ou PIN de l’installati
 - Supabase CLI, lancé avec `npx supabase` ;
 - un compte Cloudflare avec R2 activé ;
 - un projet Firebase Hosting, ou un autre hébergeur statique compatible SPA.
-- environ 60 Mo disponibles dans Firebase Hosting pour la source du modèle Whisper, si la transcription doit être proposée.
+- environ 92 Mo disponibles dans Firebase Hosting pour les sources Tiny et Base Q5_1, si la transcription doit être proposée.
 
 ```powershell
 git clone https://github.com/kabomane/TBA-Reader.git
@@ -46,7 +46,7 @@ Remplacez :
 - le site Hosting dans `deploy/firebase.json` ;
 - les URLs `og:image`, `og:url` et `twitter:image` dans `index.html` ;
 - les trois domaines autorisés dans `supabase/functions/tba-admin/index.ts` : fonction `allowedOrigin` et liste `corsOrigins` de l’action `r2-setup`.
-- le fichier source Whisper `public/whisper/ggml-base-q5_1.bin` uniquement si vous changez de variante ; dans ce cas, mettez aussi à jour son identifiant, sa taille et son SHA-256 dans `src/whisperConfig.js` et dans l’Edge Function.
+- les fichiers Whisper `public/whisper/ggml-tiny-q5_1.bin` et `public/whisper/ggml-base-q5_1.bin` uniquement si vous changez de variante ; dans ce cas, mettez aussi à jour leurs identifiants, tailles et SHA-256 dans `src/whisperConfig.js`, le manifeste et l’Edge Function.
 
 Conservez les origines sans chemin final : `https://exemple.fr`, pas `https://exemple.fr/chemin`.
 
@@ -169,11 +169,11 @@ Les origines d’écriture doivent correspondre exactement au schéma, au domain
 
 ### Activer Whisper
 
-Après avoir configuré et activé R2, ouvrez **Infrastructure → Paramètres → Whisper Q5_b**. L’activation télécharge le modèle multilingue Base Q5_1 depuis le Firebase Hosting courant, vérifie sa taille et son SHA-256, puis le publie dans R2. Les utilisateurs ne téléchargent jamais la source Firebase : ils utilisent l’URL R2 enregistrée dans `tba_public_whisper` seulement lorsque `?ard=true` est présent.
+Après avoir configuré et activé R2, ouvrez **Infrastructure → Paramètres → Whisper Q5_1**. L’activation télécharge Tiny puis Base depuis le Firebase Hosting courant, vérifie leurs tailles et SHA-256, les publie dans R2 et n’active Whisper qu’après vérification des deux objets. Les utilisateurs ne téléchargent jamais les sources Firebase : ils utilisent les URLs R2 enregistrées dans `tba_public_whisper` seulement lorsque `?ard=true` est présent.
 
-Le bouton **Lire** de `/tba/<share_id>?ard=true` ouvre la vue dédiée `/tba/<share_id>/rd?ard=true`. Cette vue charge d’abord l’audio depuis Supabase Storage ou R2, puis charge le modèle depuis IndexedDB ou R2 et transcrit localement par blocs de 60 secondes. Une route `/rd` ouverte sans le flag exact revient vers l’épisode classique.
+Le bouton **Lire** de `/tba/<share_id>?ard=true` ouvre la vue dédiée `/tba/<share_id>/rd?ard=true`. L’utilisateur choisit **Tiny Q5_1 — rapide** ou **Base Q5_1 — précis** dans un menu custom TBA Reader, sans `<select>` natif ; chaque libellé reste centré sur une seule ligne. Base est sélectionné initialement et le dernier choix est mémorisé. Cette vue charge d’abord l’audio depuis Supabase Storage ou R2, puis charge uniquement le modèle choisi depuis IndexedDB ou R2 et transcrit localement par blocs de 60 secondes. Les transcriptions restent séparées par modèle. Dans **À propos**, `indexDB` reste blanc, Base/Tiny sont gris par défaut et deviennent dorés individuellement lorsqu’ils sont présents dans IndexedDB. Une route `/rd` ouverte sans le flag exact revient vers l’épisode classique.
 
-La désactivation supprime l’accès public avant de supprimer le fichier R2. Désactivez toujours Whisper avant de désactiver ou reconfigurer R2. Pour réappliquer CORS sans bouton supplémentaire, désactivez puis réactivez Whisper depuis sa carte dédiée.
+La désactivation supprime l’accès public avant de supprimer les deux fichiers R2. Désactivez toujours Whisper avant de désactiver ou reconfigurer R2. Pour réappliquer CORS sans bouton supplémentaire, désactivez puis réactivez Whisper depuis sa carte dédiée.
 
 ## 7. Installer Firebase Hosting et le domaine
 
@@ -216,8 +216,9 @@ Firebase doit afficher `Deploy complete!`. Vérifiez ensuite le domaine Firebase
 - seule `/tba/<share_id>/rd` reçoit les en-têtes COOP/COEP de Whisper et son rechargement conserve le fond sombre ;
 - R2 et la migration automatique sont désactivés jusqu’à activation explicite ;
 - Whisper est désactivé, `tba_public_whisper.whisper_ready` vaut `false` et aucune URL de modèle n’est publiée ;
-- l’activation Whisper fonctionne après activation de R2 et le modèle est servi depuis `r2.dev` ;
-- `?ard=true` affiche **Lire**, la vue `/rd` transcrit par blocs de 60 secondes et `/rd` sans flag revient vers l’épisode ;
+- l’activation Whisper fonctionne après activation de R2 et les deux modèles sont servis depuis `r2.dev` ;
+- `?ard=true` affiche le menu custom Tiny/Base et **Lire**, sans retour à la ligne dans les options ; la vue `/rd` télécharge seulement le modèle choisi, transcrit par blocs de 60 secondes et `/rd` sans flag revient vers l’épisode ;
+- la pill **À propos** affiche `indexDB Base Q5_1 · Tiny Q5_1`, avec uniquement les modèles réellement présents dans IndexedDB en doré ;
 - l’archive ZIP fonctionne depuis une origine autorisée sans supprimer de données.
 
 ## Documentation officielle

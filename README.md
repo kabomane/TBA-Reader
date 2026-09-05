@@ -20,7 +20,7 @@ Ce document décrit l’architecture actuellement déployée. Il ne doit conteni
 - Une clé visuelle `TBA-XXXX-00` peut être chargée depuis **À propos** pour afficher les épisodes associés.
 - La vitrine utilise un cache local léger avec actualisation en arrière-plan des métadonnées publiques.
 - Avec `?ard=true`, un bouton **Lire** apparaît sur `/tba/<share_id>` et ouvre `/tba/<share_id>/rd?ard=true` pour transcrire localement l’audio lorsque Whisper est activé par un administrateur.
-- Le modèle Whisper est distribué par Cloudflare R2 puis conservé dans IndexedDB pendant un mois. L’audio et la transcription ne quittent pas le navigateur.
+- Les modèles Whisper Tiny Q5_1 et Base Q5_1 sont distribués par Cloudflare R2. Le modèle choisi est conservé dans IndexedDB pendant un mois. L’audio et la transcription ne quittent pas le navigateur.
 
 ### Espace créateur
 
@@ -46,7 +46,7 @@ Le mode Infrastructure permet de :
 - migrer manuellement un épisode complet entre Supabase et R2 ;
 - configurer ou désactiver la migration automatique ;
 - connecter Cloudflare R2 ;
-- installer, publier ou supprimer le modèle Whisper distribué par R2 ;
+- installer, publier ou supprimer les deux modèles Whisper distribués par R2 ;
 - télécharger une archive ZIP locale de tous les épisodes Supabase et R2 ;
 - changer le PIN administrateur.
 
@@ -68,7 +68,7 @@ Entrer dans l’écran Stockage ne déclenche pas une nouvelle lecture. Le bouto
 - **zip.js** : création progressive de l’archive complète dans le navigateur.
 - **Firebase Hosting** : hébergement du build et réécriture SPA.
 - **localStorage** : cache vitrine, configuration publique R2, signets, corps Markdown récents, clé TBA et limite locale de session admin.
-- **IndexedDB** : modèle Whisper Q5_b et progression locale des transcriptions.
+- **IndexedDB** : modèles Whisper Tiny/Base Q5_1 téléchargés à la demande et progression locale séparée par modèle. Dans **À propos**, `indexDB` reste blanc ; les libellés Base/Tiny sont gris par défaut et deviennent dorés individuellement lorsque le modèle correspondant est présent localement.
 - **react-markdown** et **remark-gfm** : rendu Markdown.
 
 Supabase Realtime n’est pas utilisé. Le frontend n’ouvre aucun canal ou WebSocket et `public.episodes` a été retirée de la publication `supabase_realtime`.
@@ -174,7 +174,7 @@ Le manifeste `data` suit cette forme :
 - `tba_settings` conserve aussi l’état privé d’installation Whisper, sa clé R2 et la dernière erreur de nettoyage.
 - `tba_storage_jobs` : état temporaire des copies Supabase ↔ R2 et reprise de la dernière erreur d’un épisode.
 - `tba_public_storage` : uniquement l’état public minimal de R2 et son URL publique.
-- `tba_public_whisper` : singleton public contenant seulement `whisper_ready` et `whisper_public_url`.
+- `tba_public_whisper` : singleton public contenant `whisper_ready`, l’URL Base historique et l’URL Tiny.
 
 Les tables privées ont RLS activé et aucune politique publique. `tba_public_storage` et `tba_public_whisper` exposent uniquement les valeurs nécessaires au frontend.
 
@@ -266,21 +266,21 @@ Ne jamais placer un secret Cloudflare dans React, Firebase Hosting ou ce README.
 
 ### Distribution Whisper
 
-Whisper dépend d’un bucket R2 configuré, actif et accessible via son adresse publique `r2.dev`. Le fichier source versionné reste dans Firebase Hosting, sous `/whisper/ggml-base-q5_1.bin`, mais il n’est jamais utilisé directement par les lecteurs.
+Whisper dépend d’un bucket R2 configuré, actif et accessible via son adresse publique `r2.dev`. Les sources Tiny Q5_1 (32,2 Mo) et Base Q5_1 (59,7 Mo) restent dans Firebase Hosting, sous `/whisper/`, mais elles ne sont jamais utilisées directement par les lecteurs.
 
 Lors de l’activation depuis **Infrastructure → Paramètres** :
 
 1. l’accès public Whisper est coupé pendant l’installation ;
-2. le navigateur administrateur télécharge le modèle depuis Firebase ;
-3. sa taille et son SHA-256 fixes sont vérifiés ;
-4. le navigateur l’envoie vers la clé R2 réservée avec une URL PUT temporaire ;
-5. l’Edge Function vérifie l’objet public, puis publie son URL dans `tba_public_whisper`.
+2. le navigateur administrateur télécharge Tiny puis Base depuis Firebase ;
+3. leurs tailles et SHA-256 fixes sont vérifiés ;
+4. le navigateur les envoie séquentiellement vers leurs clés R2 avec des URLs PUT temporaires ;
+5. l’Edge Function vérifie les deux objets publics, puis publie leurs URLs dans `tba_public_whisper`.
 
-La désactivation retire d’abord l’URL publique de la base, puis supprime l’objet R2. Une clé R2 déjà absente est considérée comme correctement nettoyée, ce qui évite tout blocage après une installation interrompue. Une autre erreur de suppression laisse Whisper inaccessible et place l’installation dans l’état `cleanup_required`. R2 ne peut pas être désactivé ou reconfiguré tant que Whisper est installé ou doit être nettoyé.
+La désactivation retire d’abord les URLs publiques de la base, puis supprime les deux objets R2. Une clé R2 déjà absente est considérée comme correctement nettoyée, ce qui évite tout blocage après une installation interrompue. Une autre erreur de suppression laisse Whisper inaccessible et place l’installation dans l’état `cleanup_required`. R2 ne peut pas être désactivé ou reconfiguré tant que Whisper est installé ou doit être nettoyé.
 
 Avant chaque installation, l’Edge Function réapplique aussi la politique CORS R2. Les lectures publiques `GET`/`HEAD` acceptent toute origine, tandis que les envois `PUT` restent limités à l’origine exacte de l’administration et aux domaines TBA. Le navigateur réessaie automatiquement l’upload pendant la propagation éventuelle de la règle CORS.
 Pour réappliquer cette politique sur un bucket existant, désactiver puis réactiver Whisper depuis sa carte dédiée.
-Le frontend ne consulte `tba_public_whisper` que lorsque le paramètre exact `?ard=true` est présent. Ce flag masque la fonctionnalité sans l’autoriser : l’accès réel dépend de `whisperEnabled` et de l’URL du modèle renvoyés par Supabase. Une consultation normale de TBA Reader ne produit donc aucune requête Supabase liée à Whisper. Après autorisation, le modèle est téléchargé exclusivement depuis R2, vérifié de nouveau puis conservé dans IndexedDB. Il n’existe aucun repli utilisateur vers Firebase.
+Le frontend ne consulte `tba_public_whisper` que lorsque le paramètre exact `?ard=true` est présent. Ce flag masque la fonctionnalité sans l’autoriser : l’accès réel dépend de `whisperEnabled` et des URLs renvoyées par Supabase. Une consultation normale de TBA Reader ne produit donc aucune requête Supabase liée à Whisper. L’utilisateur choisit **Tiny Q5_1 — rapide** ou **Base Q5_1 — précis** dans un menu entièrement dessiné aux couleurs de TBA Reader, sans `<select>` natif. Les libellés restent centrés sur une ligne insécable. Base est le choix initial et la préférence est mémorisée dans `localStorage`. Seul le modèle choisi est téléchargé depuis R2, vérifié puis conservé dans IndexedDB. Il n’existe aucun repli utilisateur vers Firebase.
 
 ---
 
@@ -298,10 +298,10 @@ La fonction accepte uniquement `POST`. Sauf pour l’amorçage unique du compte,
 | `r2-setup` | Créer et connecter le bucket R2. |
 | `r2-custom-domain` | Enregistrer puis activer un domaine personnalisé R2 lorsque son DNS et TLS sont actifs. |
 | `r2-upload-urls` | Produire des URL d’envoi signées et limitées aux objets de l’épisode. |
-| `whisper-install-start` | Masquer Whisper et préparer l’envoi temporaire du modèle vers R2. |
-| `whisper-install-finish` | Vérifier l’objet R2 et publier son URL. |
-| `whisper-install-cancel` | Annuler une installation et nettoyer son objet R2. |
-| `whisper-disable` | Couper l’accès public et supprimer le modèle R2. |
+| `whisper-install-start` | Masquer Whisper et préparer les envois temporaires des deux modèles vers R2. |
+| `whisper-install-finish` | Vérifier les deux objets R2 et publier leurs URLs. |
+| `whisper-install-cancel` | Annuler une installation et nettoyer ses deux objets R2. |
+| `whisper-disable` | Couper l’accès public et supprimer les deux modèles R2. |
 | `save` | Valider et enregistrer un épisode. |
 | `migration-start` | Préparer ou reprendre une migration. |
 | `migration-finish` | Vérifier, basculer le fournisseur et nettoyer la source. |
@@ -443,8 +443,10 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - Une clé TBA se charge sur HTTPS et affiche les épisodes associés.
 - Sans `?ard=true`, aucun bouton ni requête Supabase Whisper n’existe.
 - Avec le flag et Whisper actif, **Lire** est immédiatement disponible et ouvre la vue dédiée `/tba/<share_id>/rd?ard=true`.
-- La vue dédiée contient seulement **Fermer**, **Lire/Relire** et la transcription.
-- Après le clic sur **Lire**, elle résout l’URL audio selon son fournisseur, charge et décode l’audio, puis charge le modèle Whisper local ou le télécharge dans IndexedDB avant de transcrire par blocs de 60 secondes.
+- La vue dédiée contient **Fermer**, un sélecteur custom Tiny rapide/Base précis aligné sur une seule ligne, **Lire/Relire** et la transcription.
+- Dans **À propos**, la pill affiche `indexDB Base Q5_1 · Tiny Q5_1` : `indexDB` reste blanc, les modèles absents sont gris et chaque modèle présent en cache devient doré.
+- Après le clic sur **Lire**, elle résout l’URL audio selon son fournisseur, charge et décode l’audio, puis charge uniquement le modèle choisi depuis IndexedDB ou R2 avant de transcrire par blocs de 60 secondes.
+- Les caches de modèle et de transcription sont séparés par variante. Changer de modèle ne supprime pas le résultat de l’autre.
 - Une transcription complète créée avec les anciens blocs de 30 secondes reste lisible. Une progression partielle en 30 secondes est ignorée ; une progression partielle en 60 secondes peut reprendre au prochain bloc.
 - `/tba/<share_id>/rd` sans le flag exact redirige vers l’épisode classique, sans flag.
 
@@ -466,7 +468,7 @@ Ne pas créer un dossier de déploiement alternatif pour contourner un blocage W
 - Les seuils 75 % et 60 % sont appliqués.
 - R2 est inaccessible tant que sa configuration n’est pas validée.
 - Whisper ne peut être activé que lorsque R2 est configuré et actif.
-- L’activation copie le modèle Firebase vérifié vers R2 ; la désactivation retire son accès public et son objet R2.
+- L’activation copie Tiny et Base vérifiés vers R2 puis les publie ensemble ; la désactivation retire leur accès public et les deux objets R2.
 - Aucun canal ou WebSocket Realtime n’est ouvert.
 - Une archive contient l’index hors ligne, les métadonnées, le Markdown et les médias disponibles des deux fournisseurs.
 - La création d’une archive n’envoie aucune écriture et ne supprime aucun objet.

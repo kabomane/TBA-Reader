@@ -3,10 +3,27 @@ import { AwsClient } from "npm:aws4fetch@1.0.20";
 
 const SUPABASE_BUCKET = "tba-media";
 const MAX_SUPABASE_FILE_BYTES = 50_000_000;
-const WHISPER_MODEL_KEY = "whisper/ggml-base-q5_1-v1.bin";
-const WHISPER_MODEL_BYTES = 59_707_625;
-const WHISPER_MODEL_SHA256 = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898";
-const WHISPER_SOURCE_PATH = "/whisper/ggml-base-q5_1.bin";
+const WHISPER_MODELS = [
+  {
+    id: "tiny",
+    name: "Tiny Q5_1",
+    qualifier: "rapide",
+    key: "whisper/ggml-tiny-q5_1-v1.bin",
+    bytes: 32_152_673,
+    sha256: "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
+    sourcePath: "/whisper/ggml-tiny-q5_1.bin",
+  },
+  {
+    id: "base",
+    name: "Base Q5_1",
+    qualifier: "précis",
+    key: "whisper/ggml-base-q5_1-v1.bin",
+    bytes: 59_707_625,
+    sha256: "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
+    sourcePath: "/whisper/ggml-base-q5_1.bin",
+  },
+] as const;
+const WHISPER_BASE_MODEL = WHISPER_MODELS.find((model) => model.id === "base")!;
 const ADMIN_USER_KEY = "tba-admin@bizave.local";
 const technicalIdPattern = /^[a-zA-Z0-9-]{3,64}$/;
 const shareIdPattern = /^[a-z0-9]{8}$/;
@@ -402,18 +419,25 @@ function isMissingR2Object(error: unknown) {
   return status === 404 || /specified key does not exist|no such key|nosuchkey|object not found/i.test(message);
 }
 
-async function deleteWhisperObject(supabase: AdminClient, key: string) {
-  try {
-    await deleteR2Objects(supabase, [key]);
-  } catch (error) {
-    if (!isMissingR2Object(error)) throw error;
+async function deleteWhisperObjects(supabase: AdminClient) {
+  for (const model of WHISPER_MODELS) {
+    try {
+      await deleteR2Objects(supabase, [model.key]);
+    } catch (error) {
+      if (!isMissingR2Object(error)) throw error;
+    }
   }
 }
 
-async function publishWhisper(supabase: AdminClient, ready: boolean, modelUrl: string | null = null) {
+async function publishWhisper(
+  supabase: AdminClient,
+  ready: boolean,
+  modelUrls: { tiny?: string; base?: string } = {},
+) {
   const { error } = await supabase.from("tba_public_whisper").update({
     whisper_ready: ready,
-    whisper_public_url: ready ? modelUrl : null,
+    whisper_public_url: ready ? modelUrls.base ?? null : null,
+    whisper_tiny_public_url: ready ? modelUrls.tiny ?? null : null,
   }).eq("id", true);
   if (error) throw error;
 }
@@ -637,7 +661,7 @@ Deno.serve(async (req) => {
       await publishWhisper(supabase, false);
       await updateWhisperState(supabase, {
         whisper_status: "installing",
-        whisper_model_key: WHISPER_MODEL_KEY,
+        whisper_model_key: WHISPER_BASE_MODEL.key,
         whisper_error: null,
         whisper_installed_at: null,
       });
@@ -648,41 +672,51 @@ Deno.serve(async (req) => {
         config.r2_bucket,
         allowedOrigin(req.headers.get("origin") ?? ""),
       );
-      const signing = await r2UploadUrls(supabase, [WHISPER_MODEL_KEY]);
+      const signing = await r2UploadUrls(supabase, WHISPER_MODELS.map((model) => model.key));
       const sourceOrigin = allowedOrigin(req.headers.get("origin") ?? "");
       return json(req, {
         ok: true,
-        sourceUrl: `${sourceOrigin}${WHISPER_SOURCE_PATH}`,
-        uploadUrl: signing.objects[0]?.url,
-        key: WHISPER_MODEL_KEY,
-        expectedBytes: WHISPER_MODEL_BYTES,
-        expectedSha256: WHISPER_MODEL_SHA256,
+        models: WHISPER_MODELS.map((model) => ({
+          id: model.id,
+          name: model.name,
+          qualifier: model.qualifier,
+          sourceUrl: `${sourceOrigin}${model.sourcePath}`,
+          uploadUrl: signing.objects.find((item: { key: string }) => item.key === model.key)?.url,
+          key: model.key,
+          expectedBytes: model.bytes,
+          expectedSha256: model.sha256,
+        })),
       });
     }
 
     if (payload.action === "whisper-install-finish") {
       const config = await settings(supabase);
-      if (config.whisper_status !== "installing" || config.whisper_model_key !== WHISPER_MODEL_KEY) {
+      if (config.whisper_status !== "installing" || config.whisper_model_key !== WHISPER_BASE_MODEL.key) {
         return json(req, { error: "Installation Whisper absente ou expirée." }, 409);
       }
-      await verifyR2(supabase, [{ key: WHISPER_MODEL_KEY, size: WHISPER_MODEL_BYTES, mime: "application/octet-stream" }]);
-      const modelUrl = `${config.r2_public_url}/${encodeObjectKey(WHISPER_MODEL_KEY)}`;
+      await verifyR2(supabase, WHISPER_MODELS.map((model) => ({
+        key: model.key,
+        size: model.bytes,
+        mime: "application/octet-stream",
+      })));
+      const modelUrls = Object.fromEntries(WHISPER_MODELS.map((model) => [
+        model.id,
+        `${config.r2_public_url}/${encodeObjectKey(model.key)}`,
+      ])) as { tiny: string; base: string };
       await updateWhisperState(supabase, {
         whisper_status: "active",
-        whisper_model_key: WHISPER_MODEL_KEY,
+        whisper_model_key: WHISPER_BASE_MODEL.key,
         whisper_error: null,
         whisper_installed_at: new Date().toISOString(),
       });
-      await publishWhisper(supabase, true, modelUrl);
-      return json(req, { ok: true, modelUrl });
+      await publishWhisper(supabase, true, modelUrls);
+      return json(req, { ok: true, modelUrl: modelUrls.base, modelUrls });
     }
 
     if (payload.action === "whisper-install-cancel" || payload.action === "whisper-disable") {
       await publishWhisper(supabase, false);
-      const config = await settings(supabase);
-      const key = config.whisper_model_key === WHISPER_MODEL_KEY ? WHISPER_MODEL_KEY : null;
       try {
-        if (key) await deleteWhisperObject(supabase, key);
+        await deleteWhisperObjects(supabase);
         await updateWhisperState(supabase, {
           whisper_status: "disabled",
           whisper_model_key: null,
@@ -694,10 +728,10 @@ Deno.serve(async (req) => {
         const message = error instanceof Error ? error.message : "Suppression R2 impossible.";
         await updateWhisperState(supabase, {
           whisper_status: "cleanup_required",
-          whisper_model_key: key,
+          whisper_model_key: WHISPER_BASE_MODEL.key,
           whisper_error: message,
         });
-        return json(req, { error: `Whisper est désactivé, mais son fichier R2 n’a pas pu être supprimé : ${message}` }, 500);
+        return json(req, { error: `Whisper est désactivé, mais ses fichiers R2 n’ont pas pu être supprimés : ${message}` }, 500);
       }
     }
 

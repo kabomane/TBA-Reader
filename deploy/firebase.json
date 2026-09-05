@@ -44,6 +44,15 @@
         ]
       },
       {
+        "source": "/whisper/ggml-tiny-q5_1.bin",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=2592000,immutable"
+          }
+        ]
+      },
+      {
         "source": "/whisper/model-manifest.json",
         "headers": [
           {

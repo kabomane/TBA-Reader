@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { WHISPER_MODEL_BYTES, WHISPER_MODEL_SHA256 } from "./whisperConfig.js";
+import { WHISPER_MODELS, WHISPER_MODEL_KEYS } from "./whisperConfig.js";
 
 const SUPABASE_URL = "https://lfgllmxdcnylabdcvmsk.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_YAuJXFnXZDQBWjvKjJ2-0A_lTOKdpYm";
@@ -580,9 +580,14 @@ export async function changeAdminPin(nextPin) {
 export async function getPublicWhisperConfig() {
   const { data, error } = await getClient().rpc("tba_public_whisper_config");
   if (error) throw error;
+  const legacyBaseUrl = typeof data?.modelUrl === "string" ? data.modelUrl : "";
   return {
     whisperEnabled: data?.whisperEnabled === true,
-    modelUrl: typeof data?.modelUrl === "string" ? data.modelUrl : "",
+    modelUrl: legacyBaseUrl,
+    modelUrls: {
+      tiny: typeof data?.modelUrls?.tiny === "string" ? data.modelUrls.tiny : "",
+      base: typeof data?.modelUrls?.base === "string" ? data.modelUrls.base : legacyBaseUrl,
+    },
   };
 }
 
@@ -649,16 +654,27 @@ export async function toggleWhisperDistribution(enabled, onProgress = () => {}) 
   try {
     onProgress({ phase: "prepare", progress: 0 });
     const started = await adminRequest({ action: "whisper-install-start" });
-    const expectedBytes = Number(started.expectedBytes) || WHISPER_MODEL_BYTES;
-    const expectedSha256 = String(started.expectedSha256 || WHISPER_MODEL_SHA256).toLowerCase();
-    const blob = await downloadWhisperSource(started.sourceUrl, expectedBytes, onProgress);
-    if (blob.size !== expectedBytes) throw new Error("Le modèle Firebase téléchargé est incomplet.");
-    onProgress({ phase: "verify", progress: 0 });
-    const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
-    const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    if (checksum !== expectedSha256) throw new Error("Le modèle Firebase ne correspond pas à la version attendue.");
-    onProgress({ phase: "verify", progress: 1 });
-    await uploadWhisperWithRetry(started.uploadUrl, blob, onProgress);
+    const installModels = Array.isArray(started.models) ? started.models : [];
+    if (installModels.length !== WHISPER_MODEL_KEYS.length) throw new Error("Catalogue Whisper incomplet renvoyé par le serveur.");
+    for (let index = 0; index < WHISPER_MODEL_KEYS.length; index += 1) {
+      const key = WHISPER_MODEL_KEYS[index];
+      const model = WHISPER_MODELS[key];
+      const remote = installModels.find((item) => item?.id === key);
+      const expectedBytes = Number(remote?.expectedBytes);
+      const expectedSha256 = String(remote?.expectedSha256 || "").toLowerCase();
+      if (!remote?.sourceUrl || !remote?.uploadUrl || expectedBytes !== model.bytes || expectedSha256 !== model.sha256) {
+        throw new Error(`Configuration Firebase/R2 invalide pour ${model.name}.`);
+      }
+      const report = (state) => onProgress({ ...state, model: model.name, current: index + 1, total: WHISPER_MODEL_KEYS.length });
+      const blob = await downloadWhisperSource(remote.sourceUrl, expectedBytes, report);
+      if (blob.size !== expectedBytes) throw new Error(`${model.name} téléchargé depuis Firebase est incomplet.`);
+      report({ phase: "verify", progress: 0 });
+      const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+      const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (checksum !== expectedSha256) throw new Error(`${model.name} ne correspond pas à la version attendue.`);
+      report({ phase: "verify", progress: 1 });
+      await uploadWhisperWithRetry(remote.uploadUrl, blob, report);
+    }
     onProgress({ phase: "publish", progress: 0 });
     const result = await adminRequest({ action: "whisper-install-finish" });
     onProgress({ phase: "publish", progress: 1 });

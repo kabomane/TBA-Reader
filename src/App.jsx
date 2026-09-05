@@ -11,7 +11,8 @@ import {
 } from "./accessKey.js";
 import { MarkdownBody } from "./MarkdownBody.jsx";
 import { validateAudioFile } from "./media.js";
-import { hasCachedWhisperModel, useLocalTranscription } from "./transcription.js";
+import { cachedWhisperModelKeys, useLocalTranscription } from "./transcription.js";
+import { DEFAULT_WHISPER_MODEL_KEY, WHISPER_MODELS, WHISPER_MODEL_KEYS } from "./whisperConfig.js";
 import {
   EPISODE_REFRESH_INTERVAL_MS,
   changeAdminPin,
@@ -38,6 +39,7 @@ const BOOKMARKS_KEY = "tba-bookmarks-v1";
 const R2_INCLUDED_BYTES = 10_000_000_000;
 const MAX_SUPABASE_FILE_BYTES = 50_000_000;
 const SHOWCASE_CACHE_KEY = "tba-showcase-cache-v1";
+const WHISPER_SELECTION_KEY = "tba-whisper-model-v1";
 const MarkdownEditor = lazy(() => import("./MarkdownEditor.jsx").then((module) => ({ default: module.MarkdownEditor })));
 const FORMAT_OPTIONS = [
   { value: "Tous", label: "Tous" },
@@ -580,23 +582,99 @@ function EpisodePage({ episode, onBack, onTag, bookmarked, onToggleBookmark, rea
   );
 }
 
-function ReaderPage({ episode, onBack, whisperModelUrl }) {
+function ReaderPage({ episode, onBack, whisperModelUrls }) {
+  const availableModelKeys = useMemo(
+    () => WHISPER_MODEL_KEYS.filter((key) => Boolean(whisperModelUrls?.[key])),
+    [whisperModelUrls],
+  );
+  const [modelKey, setModelKey] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(WHISPER_SELECTION_KEY);
+      return WHISPER_MODELS[stored] ? stored : DEFAULT_WHISPER_MODEL_KEY;
+    } catch {
+      return DEFAULT_WHISPER_MODEL_KEY;
+    }
+  });
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const modelMenuRoot = useRef(null);
+  const selectedModelKey = availableModelKeys.includes(modelKey)
+    ? modelKey
+    : availableModelKeys.includes(DEFAULT_WHISPER_MODEL_KEY) ? DEFAULT_WHISPER_MODEL_KEY : availableModelKeys[0];
+  const selectedModel = WHISPER_MODELS[selectedModelKey] || WHISPER_MODELS[DEFAULT_WHISPER_MODEL_KEY];
   const transcriptionEpisode = useMemo(() => {
     const resolvedAudio = episode.audioPath
       ? getPublicStorageUrl(episode.storageProvider, episode.audioPath)
       : "";
     return { ...episode, audio: resolvedAudio || episode.audio };
   }, [episode]);
-  const transcription = useLocalTranscription(transcriptionEpisode, true, whisperModelUrl);
+  const transcription = useLocalTranscription(transcriptionEpisode, true, selectedModel, whisperModelUrls?.[selectedModel.key] || "");
   const empty = !transcription.blocks.length && !transcription.busy && !transcription.label;
+  const selectModel = (nextKey) => {
+    if (!WHISPER_MODELS[nextKey] || !availableModelKeys.includes(nextKey)) return;
+    setModelKey(nextKey);
+    setModelMenuOpen(false);
+    try { window.localStorage.setItem(WHISPER_SELECTION_KEY, nextKey); } catch { /* Préférence non persistante. */ }
+  };
+  useEffect(() => {
+    if (transcription.busy) setModelMenuOpen(false);
+  }, [transcription.busy]);
+  useEffect(() => {
+    if (!modelMenuOpen) return undefined;
+    const closeOutside = (event) => {
+      if (!modelMenuRoot.current?.contains(event.target)) setModelMenuOpen(false);
+    };
+    const closeWithKeyboard = (event) => {
+      if (event.key === "Escape") setModelMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeWithKeyboard);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeWithKeyboard);
+    };
+  }, [modelMenuOpen]);
   return (
     <article className="reader-page">
       <div className="reader-actions">
         <button type="button" className="reader-close" onClick={onBack}><Icon name="back"/> Fermer</button>
-        <button type="button" className={`audio-read ${transcription.busy ? "is-busy" : ""}`} onClick={transcription.busy ? transcription.stop : transcription.start} aria-busy={transcription.busy}>
-          {transcription.busy ? "Arrêter" : transcription.buttonLabel}
-          {transcription.busy && <span className="transcription-spinner"/>}
-        </button>
+        <div className="reader-transcription-controls">
+          <div className="whisper-model-picker" ref={modelMenuRoot}>
+            <button
+              type="button"
+              className="whisper-model-trigger"
+              disabled={transcription.busy}
+              aria-label="Modèle Whisper"
+              aria-haspopup="listbox"
+              aria-expanded={modelMenuOpen}
+              onClick={() => setModelMenuOpen((open) => !open)}
+            >
+              <span>{selectedModel.name} — {selectedModel.qualifier}</span>
+              <Icon name="chevron" size={16}/>
+            </button>
+            {modelMenuOpen && <div className="whisper-model-menu" role="listbox" aria-label="Modèle Whisper">
+              {WHISPER_MODEL_KEYS.map((key) => {
+                const model = WHISPER_MODELS[key];
+                const available = availableModelKeys.includes(key);
+                return <button
+                  type="button"
+                  role="option"
+                  aria-selected={selectedModelKey === key}
+                  className={selectedModelKey === key ? "selected" : ""}
+                  key={key}
+                  disabled={!available}
+                  onClick={() => selectModel(key)}
+                >
+                  <span>{model.name} <small>— {model.qualifier}</small></span>
+                  {selectedModelKey === key && <i aria-hidden="true"/>}
+                </button>;
+              })}
+            </div>}
+          </div>
+          <button type="button" className={`audio-read ${transcription.busy ? "is-busy" : ""}`} onClick={transcription.busy ? transcription.stop : transcription.start} aria-busy={transcription.busy}>
+            {transcription.busy ? "Arrêter" : transcription.buttonLabel}
+            {transcription.busy && <span className="transcription-spinner"/>}
+          </button>
+        </div>
         {transcription.label && <span className="sr-only" role="status">{transcription.label}</span>}
       </div>
       <div className="reader-transcript" role="log" aria-live="polite">
@@ -743,12 +821,13 @@ function AccessKeyModule({ accessToken, onAccessTokenChange }) {
 }
 
 function About({ accessToken, onAccessTokenChange, onClearLocalCache }) {
-  const [whisperCached, setWhisperCached] = useState(false);
+  const [whisperCached, setWhisperCached] = useState([]);
   useEffect(() => {
     let active = true;
-    hasCachedWhisperModel().then((cached) => { if (active) setWhisperCached(cached); });
+    cachedWhisperModelKeys().then((cached) => { if (active) setWhisperCached(cached); });
     return () => { active = false; };
   }, []);
+  const cachedModelSet = new Set(whisperCached);
   return <section className="about">
     <header className="about-heading">
       <p className="eyebrow">À propos</p>
@@ -773,7 +852,11 @@ function About({ accessToken, onAccessTokenChange, onClearLocalCache }) {
         <span><strong>Cloudflare R2</strong> Stockage hybride des épisodes</span>
         <span><strong>Firebase Hosting</strong> Déploiement web</span>
         <button type="button" onClick={onClearLocalCache} aria-label="Effacer le cache vitrine et les signets"><strong>localStorage</strong> Cache vitrine · Signets</button>
-        <span className={`whisper-cache-pill ${whisperCached ? "is-cached" : ""}`}><strong>indexDB</strong> Whisper Q5_b</span>
+        <span className="whisper-cache-pill">
+          <strong>indexDB</strong>{" "}
+          <span className={cachedModelSet.has("base") ? "is-cached" : ""}>Base Q5_1</span>{" · "}
+          <span className={cachedModelSet.has("tiny") ? "is-cached" : ""}>Tiny Q5_1</span>
+        </span>
       </div>
     </section>
   </section>;
@@ -1132,6 +1215,9 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onToggleWh
       : whisperProgress?.phase === "upload" ? "Envoi vers R2"
         : whisperProgress?.phase === "publish" ? "Publication"
           : "Préparation";
+  const whisperProgressLabel = whisperProgress?.model
+    ? `${whisperPhase} · ${whisperProgress.model} (${whisperProgress.current}/${whisperProgress.total})`
+    : whisperPhase;
   const whisperLabel = whisperProgress ? whisperPhase
     : whisperStatus === "active" ? "Actif"
       : whisperStatus === "cleanup_required" ? "Nettoyage requis"
@@ -1160,11 +1246,11 @@ function SettingsPanel({ status, busy, onSave, onSetupR2, onToggleR2, onToggleWh
       <button className="settings-primary" type="button" disabled={busy} onClick={() => run(() => onSetupR2(cloudflare), "Cloudflare R2 est prêt.")}>{status?.settings?.r2Ready ? "Tester et reconfigurer" : "Créer et connecter R2"}</button>
     </section>
     <section className="settings-card">
-      <div className="settings-card-heading"><div><span>Transcription locale</span><h3>Whisper Q5_b</h3></div><div className="settings-card-controls"><em className={status?.settings?.whisperReady ? "ready" : ""}>{whisperLabel}</em><label className="switch"><input type="checkbox" aria-label="Activer Whisper" checked={whisperChecked} disabled={busy || (!whisperAvailable && !whisperChecked)} onChange={(event) => changeWhisper(event.target.checked)}/><i/></label></div></div>
-      <p>Installe le modèle Firebase vérifié dans R2. Les lecteurs le téléchargent ensuite uniquement depuis r2.dev.</p>
-      {whisperProgress && <div className="whisper-install-progress" role="status"><span>{whisperPhase}{whisperProgress.progress > 0 ? ` · ${Math.round(whisperProgress.progress * 100)} %` : "…"}</span><i><b style={{ width: `${Math.max(3, whisperProgress.progress * 100)}%` }}/></i></div>}
+      <div className="settings-card-heading"><div><span>Transcription locale</span><h3>Whisper Q5_1</h3></div><div className="settings-card-controls"><em className={status?.settings?.whisperReady ? "ready" : ""}>{whisperLabel}</em><label className="switch"><input type="checkbox" aria-label="Activer Whisper" checked={whisperChecked} disabled={busy || (!whisperAvailable && !whisperChecked)} onChange={(event) => changeWhisper(event.target.checked)}/><i/></label></div></div>
+      <p>Installe Tiny et Base depuis Firebase dans R2. Chaque lecteur télécharge ensuite uniquement le modèle choisi.</p>
+      {whisperProgress && <div className="whisper-install-progress" role="status"><span>{whisperProgressLabel}{whisperProgress.progress > 0 ? ` · ${Math.round(whisperProgress.progress * 100)} %` : "…"}</span><i><b style={{ width: `${Math.max(3, whisperProgress.progress * 100)}%` }}/></i></div>}
       {status?.settings?.whisperError && <p className="form-error">{status.settings.whisperError}</p>}
-      <small>Modèle fixe · 59,7 Mo · cache navigateur mensuel</small>
+      <small>Tiny rapide + Base précis · 91,9 Mo sur Firebase/R2 · cache navigateur mensuel à la demande</small>
     </section>
     <section className="settings-card">
       <div className="settings-card-heading"><div><span>Sécurité</span><h3>Changer le PIN</h3></div></div>
@@ -1556,7 +1642,7 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const readRequested = new URLSearchParams(window.location.search).get("ard") === "true";
-  const [whisperPublicConfig, setWhisperPublicConfig] = useState({ whisperEnabled: false, modelUrl: "", ready: false });
+  const [whisperPublicConfig, setWhisperPublicConfig] = useState({ whisperEnabled: false, modelUrl: "", modelUrls: { tiny: "", base: "" }, ready: false });
   const [view, setView] = useState(initialRoute.current.view);
   const [selectedId, setSelectedId] = useState(initialRoute.current.episodeId);
   const [adminOpen, setAdminOpen] = useState(false);
@@ -1585,18 +1671,18 @@ export default function App() {
   const bookmarkedEpisodes = useMemo(() => sorted.filter((episode) => bookmarks.has(episode.id)), [sorted, bookmarks]);
   useEffect(() => {
     if (!readRequested) {
-      setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "", ready: true });
+      setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "", modelUrls: { tiny: "", base: "" }, ready: true });
       return undefined;
     }
     let active = true;
     getPublicWhisperConfig()
       .then((config) => { if (active) setWhisperPublicConfig({ ...config, ready: true }); })
-      .catch(() => { if (active) setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "", ready: true }); });
+      .catch(() => { if (active) setWhisperPublicConfig({ whisperEnabled: false, modelUrl: "", modelUrls: { tiny: "", base: "" }, ready: true }); });
     return () => { active = false; };
   }, [readRequested]);
   useEffect(() => {
     if (view !== "reader" || !whisperPublicConfig.ready) return;
-    const usable = whisperPublicConfig.whisperEnabled && whisperPublicConfig.modelUrl;
+    const usable = whisperPublicConfig.whisperEnabled && Object.values(whisperPublicConfig.modelUrls || {}).some(Boolean);
     if (usable && (!hasFreshData || selected?.audio)) return;
     window.location.replace(`/tba/${encodeURIComponent(selectedId)}?ard=true`);
   }, [hasFreshData, selected, selectedId, view, whisperPublicConfig]);
@@ -1844,10 +1930,10 @@ export default function App() {
       content = <Archive episodes={sorted.slice(1)} allTags={allTags} tag={archiveTag} setTag={changeArchiveTag} onOpen={openEpisode} bookmarks={bookmarks} onToggleBookmark={toggleBookmark}/>;
     } else if (view === "bookmarks") {
       content = <BookmarksPage episodes={bookmarkedEpisodes} onOpen={openEpisode} onTag={openTag} bookmarks={bookmarks} onToggleBookmark={toggleBookmark}/>;
-    } else if (view === "reader" && (!whisperPublicConfig.ready || !whisperPublicConfig.whisperEnabled || !whisperPublicConfig.modelUrl || (!hasFreshData && !selected))) {
+    } else if (view === "reader" && (!whisperPublicConfig.ready || !whisperPublicConfig.whisperEnabled || !Object.values(whisperPublicConfig.modelUrls || {}).some(Boolean) || (!hasFreshData && !selected))) {
       content = <LoadingSkeleton view="episode"/>;
     } else if (view === "reader" && selected) {
-      content = <ReaderPage episode={selected} onBack={() => window.location.assign(`/tba/${encodeURIComponent(selected.id)}?ard=true`)} whisperModelUrl={whisperPublicConfig.modelUrl}/>;
+      content = <ReaderPage episode={selected} onBack={() => window.location.assign(`/tba/${encodeURIComponent(selected.id)}?ard=true`)} whisperModelUrls={whisperPublicConfig.modelUrls}/>;
     } else if (view === "reader") {
       content = showInitialSkeleton ? <LoadingSkeleton view="episode"/> : <Empty title="TBA introuvable" text={`Aucun épisode ne correspond à l’identifiant ${selectedId}.`}/>;
     } else if (view === "episode" && detailError) {
@@ -1857,7 +1943,7 @@ export default function App() {
     } else if (view === "episode" && (detailLoading || (selected && !selected.bodyLoaded) || (supabaseLoading && !selected))) {
       content = <LoadingSkeleton view="episode"/>;
     } else if (view === "episode" && selected) {
-      content = <EpisodePage episode={selected} onBack={() => navigate(selected.id === sorted[0]?.id ? "home" : "archive")} onTag={openTag} bookmarked={bookmarks.has(selected.id)} onToggleBookmark={toggleBookmark} readEnabled={readRequested && whisperPublicConfig.whisperEnabled && Boolean(whisperPublicConfig.modelUrl)}/>;
+      content = <EpisodePage episode={selected} onBack={() => navigate(selected.id === sorted[0]?.id ? "home" : "archive")} onTag={openTag} bookmarked={bookmarks.has(selected.id)} onToggleBookmark={toggleBookmark} readEnabled={readRequested && whisperPublicConfig.whisperEnabled && Object.values(whisperPublicConfig.modelUrls || {}).some(Boolean)}/>;
     } else if (view === "episode") {
       content = <Empty title="TBA introuvable" text={`Aucun épisode ne correspond à l’identifiant ${selectedId}.`}/>;
     } else {
